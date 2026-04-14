@@ -37,8 +37,7 @@ VLLM_SERVER_CONFIG: dict[str, Any] = {
     },
     "extra_vllm_args": [
         "--no-enable-prefix-caching",
-        "--distributed_executor_backend",
-        "mp"
+        "--distributed_executor_backend=mp"
     ],
     "extra_env": {},
 }
