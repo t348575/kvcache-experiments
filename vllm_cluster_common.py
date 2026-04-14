@@ -23,16 +23,22 @@ INSTANCE_GPUS = ["0", "1", "2", "3"]
 
 # Edit shared vLLM settings here for all scenario scripts.
 VLLM_SERVER_CONFIG: dict[str, Any] = {
-    "model": "meta-llama/Llama-3.1-8B-Instruct",
-    "max_model_len": 65536,
+    "model": "meta-llama/Llama-3.2-3B-Instruct",
+    "max_model_len": 92000,
     "gpu_memory_utilization": 0.9,
     "kv_transfer_config": {
-        "kv_connector": "LMCacheConnectorV1",
+        "kv_connector": "OffloadingConnector",
         "kv_role": "kv_both",
-        "kv_connector_extra_config": {},
+        "kv_connector_extra_config": {
+            "spec_name": "SharedStorageOffloadingSpec",
+            "spec_module_path": "llmd_fs_backend.spec",
+            "use_odirect": True
+        },
     },
     "extra_vllm_args": [
-        "--enable-prefix-caching",
+        "--no-enable-prefix-caching",
+        "--distributed_executor_backend",
+        "mp"
     ],
     "extra_env": {},
 }
