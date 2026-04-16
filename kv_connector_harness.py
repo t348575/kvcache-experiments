@@ -7,6 +7,17 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Any
 
+SYNTHETIC_NUM_KV_HEADS = 1
+SYNTHETIC_HEAD_SIZE = 128
+MODEL_DTYPE = "float16"
+CACHE_DTYPE = "auto"
+DEVICE = "cuda"
+MAX_NUM_BATCHED_TOKENS = 131072
+MAX_NUM_SEQS = 16
+MAX_MODEL_LEN = 131072
+REGISTER_CACHE_MODE = "auto"
+CROSS_LAYER_BACKEND_PATH = "vllm.v1.attention.backends.flash_attn:FlashAttentionBackend"
+
 
 @dataclass(frozen=True)
 class RuntimeConnectorConfig:
@@ -16,24 +27,14 @@ class RuntimeConnectorConfig:
     model_name: str = "meta-llama/Llama-3.2-3B-Instruct"
     block_size: int = 16
     num_blocks: int = 4096
-    num_kv_heads: int = 1
-    head_size: int = 128
-    dtype: str = "float16"
-    cache_dtype: str = "auto"
-    device: str = "cpu"
-    max_num_batched_tokens: int = 131072
-    max_num_seqs: int = 16
-    max_model_len: int = 131072
+    max_num_batched_tokens: int = MAX_NUM_BATCHED_TOKENS
+    max_num_seqs: int = MAX_NUM_SEQS
     enable_chunked_prefill: bool = True
     enable_prefix_caching: bool = True
     enable_permute_local_kv: bool = False
     kv_role: str = "kv_both"
     async_scheduling: bool = False
     kv_load_failure_policy: str = "fail"
-    register_cache_mode: str = "auto"
-    cross_layer_backend_path: str = (
-        "vllm.v1.attention.backends.flash_attn:FlashAttentionBackend"
-    )
 
 
 @dataclass(frozen=True)
@@ -186,6 +187,7 @@ class RuntimeKVConnectorHarness:
                 FullAttentionSpec,
                 KVCacheConfig,
                 KVCacheGroupSpec,
+                KVCacheTensor,
             )
             from vllm.v1.outputs import (
                 EMPTY_MODEL_RUNNER_OUTPUT,
@@ -194,6 +196,10 @@ class RuntimeKVConnectorHarness:
             )
             from vllm.v1.request import Request
             from vllm.v1.structured_output import StructuredOutputManager
+            from vllm.v1.worker.kv_connector_model_runner_mixin import (
+                KVConnectorModelRunnerMixin,
+            )
+            from vllm.v1.worker.utils import AttentionGroup
             from vllm.v1.core.kv_cache_utils import (
                 get_request_block_hasher,
                 init_none_hash,
@@ -204,21 +210,23 @@ class RuntimeKVConnectorHarness:
                 "runtime connector harness requires both 'torch' and 'vllm' in the active environment"
             ) from exc
 
-        dtype = getattr(torch, self.config.dtype, None)
+        dtype = getattr(torch, MODEL_DTYPE, None)
         if dtype is None:
-            raise ValueError(f"unsupported torch dtype: {self.config.dtype}")
+            raise ValueError(f"unsupported torch dtype: {MODEL_DTYPE}")
+
+        device = torch.device(DEVICE)
 
         model_config = ModelConfig(
             model=self.config.model_name,
             trust_remote_code=True,
-            dtype=self.config.dtype,
+            dtype=MODEL_DTYPE,
             seed=42,
             hf_overrides={},
         )
         scheduler_config = SchedulerConfig(
             max_num_seqs=self.config.max_num_seqs,
             max_num_batched_tokens=self.config.max_num_batched_tokens,
-            max_model_len=self.config.max_model_len,
+            max_model_len=MAX_MODEL_LEN,
             enable_chunked_prefill=self.config.enable_chunked_prefill,
             is_encoder_decoder=model_config.is_encoder_decoder,
             async_scheduling=self.config.async_scheduling,
@@ -227,7 +235,7 @@ class RuntimeKVConnectorHarness:
         cache_config = CacheConfig(
             block_size=self.config.block_size,
             gpu_memory_utilization=0.9,
-            cache_dtype=self.config.cache_dtype,
+            cache_dtype=CACHE_DTYPE,
             enable_prefix_caching=self.config.enable_prefix_caching,
         )
         kv_transfer_config = KVTransferConfig(
@@ -243,24 +251,25 @@ class RuntimeKVConnectorHarness:
             model_config=model_config,
             cache_config=cache_config,
             kv_transfer_config=kv_transfer_config,
-            device_config=DeviceConfig(self.config.device),
+            device_config=DeviceConfig(DEVICE),
             attention_config=AttentionConfig(),
         )
 
+        kv_cache_spec = FullAttentionSpec(
+            block_size=self.config.block_size,
+            num_kv_heads=SYNTHETIC_NUM_KV_HEADS,
+            head_size=SYNTHETIC_HEAD_SIZE,
+            dtype=dtype,
+        )
         kv_cache_config = KVCacheConfig(
             num_blocks=self.config.num_blocks,
-            kv_cache_tensors=[],
-            kv_cache_groups=[
-                KVCacheGroupSpec(
-                    ["layer0"],
-                    FullAttentionSpec(
-                        block_size=self.config.block_size,
-                        num_kv_heads=self.config.num_kv_heads,
-                        head_size=self.config.head_size,
-                        dtype=dtype,
-                    ),
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=kv_cache_spec.page_size_bytes * self.config.num_blocks,
+                    shared_by=["layer0"],
                 )
             ],
+            kv_cache_groups=[KVCacheGroupSpec(["layer0"], kv_cache_spec)],
         )
         vllm_config.cache_config.num_gpu_blocks = self.config.num_blocks
 
@@ -280,7 +289,7 @@ class RuntimeKVConnectorHarness:
         if scheduler_connector is None:
             raise RuntimeError("scheduler did not create a KV connector")
 
-        cache_mode = self.config.register_cache_mode
+        cache_mode = REGISTER_CACHE_MODE
         if cache_mode == "auto":
             cache_mode = (
                 "cross_layer"
@@ -289,14 +298,30 @@ class RuntimeKVConnectorHarness:
             )
 
         if cache_mode == "cross_layer":
-            module_name, _, class_name = self.config.cross_layer_backend_path.partition(
-                ":"
-            )
+            module_name, _, class_name = CROSS_LAYER_BACKEND_PATH.partition(":")
             backend_module = importlib.import_module(module_name)
             backend_cls = getattr(backend_module, class_name)
             with set_current_vllm_config(vllm_config):
+                _, cross_layers_kv_cache, _ = (
+                    KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
+                        kv_cache_config=kv_cache_config,
+                        attn_groups=[
+                            [
+                                AttentionGroup(
+                                    backend=backend_cls,
+                                    layer_names=["layer0"],
+                                    kv_cache_spec=kv_cache_spec,
+                                    kv_cache_group_id=0,
+                                )
+                            ]
+                        ],
+                        cache_dtype=CACHE_DTYPE,
+                        device=device,
+                        kernel_block_sizes=[self.config.block_size],
+                    )
+                )
                 worker_connector.register_cross_layers_kv_cache(
-                    kv_cache=torch.empty(0, dtype=dtype, device=self.config.device),
+                    kv_cache=cross_layers_kv_cache,
                     attn_backend=backend_cls,
                 )
         elif cache_mode == "layer_dict":
@@ -305,11 +330,11 @@ class RuntimeKVConnectorHarness:
                     2,
                     self.config.num_blocks,
                     self.config.block_size,
-                    self.config.num_kv_heads,
-                    self.config.head_size,
+                    SYNTHETIC_NUM_KV_HEADS,
+                    SYNTHETIC_HEAD_SIZE,
                 ),
                 dtype=dtype,
-                device=self.config.device,
+                device=device,
             )
             worker_connector.register_kv_caches({"layer0": layer_tensor})
         else:

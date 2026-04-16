@@ -164,26 +164,11 @@ def parse_args() -> argparse.Namespace:
         help="Directory for logs, per-instance CSVs, and job summaries",
     )
 
-    parser.add_argument("--model-name", default="facebook/opt-125m")
+    parser.add_argument("--model-name", default="meta-llama/Llama-3.2-3B-Instruct")
     parser.add_argument("--block-size", type=int, default=16)
     parser.add_argument("--num-blocks", type=int, default=4096)
-    parser.add_argument("--num-kv-heads", type=int, default=1)
-    parser.add_argument("--head-size", type=int, default=128)
-    parser.add_argument("--dtype", default="float16")
-    parser.add_argument("--cache-dtype", default="auto")
-    parser.add_argument("--device", default="cpu")
     parser.add_argument("--max-num-batched-tokens", type=int, default=131072)
     parser.add_argument("--max-num-seqs", type=int, default=16)
-    parser.add_argument("--max-model-len", type=int, default=131072)
-    parser.add_argument(
-        "--register-cache-mode",
-        choices=["auto", "cross_layer", "layer_dict"],
-        default="auto",
-    )
-    parser.add_argument(
-        "--cross-layer-backend-path",
-        default="vllm.v1.attention.backends.flash_attn:FlashAttentionBackend",
-    )
     return parser.parse_args()
 
 
@@ -222,7 +207,6 @@ def make_scenario_command(
     args: argparse.Namespace,
     job: PressureJob,
     instance_idx: int,
-    shared_storage_path: Path,
     csv_output: Path,
     extra_config: dict[str, Any],
 ) -> list[str]:
@@ -249,26 +233,10 @@ def make_scenario_command(
         str(args.block_size),
         "--num-blocks",
         str(args.num_blocks),
-        "--num-kv-heads",
-        str(args.num_kv_heads),
-        "--head-size",
-        str(args.head_size),
-        "--dtype",
-        args.dtype,
-        "--cache-dtype",
-        args.cache_dtype,
-        "--device",
-        args.device,
         "--max-num-batched-tokens",
         str(args.max_num_batched_tokens),
         "--max-num-seqs",
         str(args.max_num_seqs),
-        "--max-model-len",
-        str(args.max_model_len),
-        "--register-cache-mode",
-        args.register_cache_mode,
-        "--cross-layer-backend-path",
-        args.cross_layer_backend_path,
         "--csv-output",
         str(csv_output),
         "--json-output",
@@ -331,7 +299,6 @@ def run_job(
                 args=args,
                 job=job,
                 instance_idx=instance_idx,
-                shared_storage_path=shared_storage_path,
                 csv_output=csv_path,
                 extra_config=extra_config,
             )

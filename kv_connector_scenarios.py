@@ -54,28 +54,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fraction of a prior document to reuse for load-style requests.",
     )
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--model-name", type=str, default="facebook/opt-125m")
+    parser.add_argument(
+        "--model-name", type=str, default="meta-llama/Llama-3.2-3B-Instruct"
+    )
     parser.add_argument("--block-size", type=int, default=16)
     parser.add_argument("--num-blocks", type=int, default=4096)
-    parser.add_argument("--num-kv-heads", type=int, default=1)
-    parser.add_argument("--head-size", type=int, default=128)
-    parser.add_argument("--dtype", type=str, default="float16")
-    parser.add_argument("--cache-dtype", type=str, default="auto")
-    parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--max-num-batched-tokens", type=int, default=131072)
     parser.add_argument("--max-num-seqs", type=int, default=16)
-    parser.add_argument("--max-model-len", type=int, default=131072)
-    parser.add_argument(
-        "--register-cache-mode",
-        choices=["auto", "cross_layer", "layer_dict"],
-        default="auto",
-        help="How to initialize worker-side KV caches before running the connector.",
-    )
-    parser.add_argument(
-        "--cross-layer-backend-path",
-        default="vllm.v1.attention.backends.flash_attn:FlashAttentionBackend",
-        help="Attention backend used when register-cache-mode is cross_layer.",
-    )
     parser.add_argument("--csv-output", type=str, default=None)
     parser.add_argument("--json-output", action="store_true")
     return parser
@@ -126,16 +111,8 @@ def main() -> None:
         model_name=args.model_name,
         block_size=args.block_size,
         num_blocks=args.num_blocks,
-        num_kv_heads=args.num_kv_heads,
-        head_size=args.head_size,
-        dtype=args.dtype,
-        cache_dtype=args.cache_dtype,
-        device=args.device,
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_num_seqs=args.max_num_seqs,
-        max_model_len=args.max_model_len,
-        register_cache_mode=args.register_cache_mode,
-        cross_layer_backend_path=args.cross_layer_backend_path,
     )
 
     harness = RuntimeKVConnectorHarness(config)
