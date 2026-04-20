@@ -56,6 +56,7 @@ Requirements
   git clone https://github.com/LMCache/LMCache.git   # for long_doc_qa.py
 """
 
+import argparse
 import csv
 import itertools
 import json
@@ -64,23 +65,31 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
 import requests
 
+from benchmark_common import (
+    resolve_scratch_path_for_config,
+    save_profile_artifacts,
+    write_dataclass_csv,
+)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION — edit this section to add / remove test scenarios
 # ─────────────────────────────────────────────────────────────────────────────
 
-MODEL = "meta-llama/Llama-3.2-3B-Instruct"
-MAX_MODEL_LEN = 92000
-GPU_MEM_UTIL = 0.9
-VLLM_PORT = 8000
-N_REPETITIONS = 1            # how many times each expanded config is tested
-SERVER_STARTUP_TIMEOUT = 200  # seconds to wait for vLLM to become healthy
+DEFAULT_CONFIG_PATH = "bench_config.json"
+
+MODEL: Optional[str] = None
+MAX_MODEL_LEN: Optional[int] = None
+GPU_MEM_UTIL: Optional[float] = None
+VLLM_PORT: Optional[int] = None
+N_REPETITIONS: Optional[int] = None            # how many times each expanded config is tested
+SERVER_STARTUP_TIMEOUT: Optional[int] = None  # seconds to wait for vLLM to become healthy
 
 # ── Flush mode ────────────────────────────────────────────────────────────────
 # When FLUSH_MODE is True, each run follows this sequence (instead of the
@@ -94,40 +103,26 @@ SERVER_STARTUP_TIMEOUT = 200  # seconds to wait for vLLM to become healthy
 # the timed query round begins.
 FLUSH_MODE = False
 
-FLUSH_NUM_DOCS    = 2
-FLUSH_DOC_LENGTH  = 90000
-FLUSH_MAX_INFLIGHT = 1
-_RUN_TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M%S')
-OUTPUT_DIR = f"kv_benchmark_{_RUN_TIMESTAMP}"
-OUTPUT_CSV = f"kv_benchmark_results_{_RUN_TIMESTAMP}.csv"
+FLUSH_NUM_DOCS: Optional[int] = None
+FLUSH_DOC_LENGTH: Optional[int] = None
+FLUSH_MAX_INFLIGHT: Optional[int] = None
+OUTPUT_DIR: Optional[str] = None
+OUTPUT_CSV: Optional[str] = None
 
-LONG_DOC_QA_SCRIPT = "lmcache-longdoc.py"
+LONG_DOC_QA_SCRIPT: Optional[str] = None
 
 # Global defaults for long_doc_qa — inherited by every config.
 # Any key can be a list to sweep across all configs.
 # Per-config `long_doc_qa_args` overrides individual keys.
-LONG_DOC_QA_DEFAULTS: dict[str, Any] = {
-    "--num-documents":         "5",
-    "--document-length":       "10000",
-    "--output-len":            "1",
-    "--repeat-count":          "5",
-    "--repeat-mode":           "random",
-    "--max-inflight-requests": "4",
-}
+LONG_DOC_QA_DEFAULTS: dict[str, Any] = {}
 
 # ── ShareGPT / vllm bench serve ───────────────────────────────────────────────
 # Path to the ShareGPT JSON dataset file.
-SHAREGPT_DATASET_PATH = "dataset/ShareGPT_V3_unfiltered_cleaned_split.json"
+SHAREGPT_DATASET_PATH: Optional[str] = None
 
 # Global defaults for vllm bench serve — inherited by every sharegpt config.
 # Per-config `sharegpt_args` overrides individual keys.
-SHAREGPT_DEFAULTS: dict[str, Any] = {
-    "--num-prompts":    "100",
-    "--request-rate":   "32",
-    "--percentile-metrics": "ttft,tpot,itl",
-    "--metric-percentiles": "95,99",
-    "--output-len": 1
-}
+SHAREGPT_DEFAULTS: dict[str, Any] = {}
 
 # ── Define your test scenarios here ──────────────────────────────────────────
 #
@@ -153,62 +148,7 @@ SHAREGPT_DEFAULTS: dict[str, Any] = {
 #       "sharegpt_args": { "--num-prompts": ["100", "500"] },
 #   }
 #
-CONFIGS = [
-    {
-        "name": "baseline",
-        "description": "No CPU offloading, no GPU prefix caching",
-        "vllm_args": {
-            "--no-enable-prefix-caching": None
-        },
-        "profile_json": "results_engine_core_0.json",
-        # "sharegpt_args": {
-        #     "--request-rate": ["8", "16", "32"]
-        # }
-        "long_doc_qa_args": {
-            "--document-length": ["1024", "10240", "40960", "81920"]
-        }
-    },
-    {
-        "name": "offloading",
-        "description": "vLLM built-in OffloadingConnector",
-        "profile_json": "results_engine_core_0.json",
-        "vllm_args": {
-            "--no-enable-prefix-caching": None,
-            "--kv-offloading-backend":    "native",
-            "--kv-offloading-size":       "128",
-            "--disable-hybrid-kv-cache-manager": None,
-        },
-        "profile_json": "results_engine_core_0.json",
-        # "sharegpt_args": {
-        #     "--request-rate": ["8", "16", "32"]
-        # }
-        "long_doc_qa_args": {
-            "--document-length": ["1024", "10240", "40960", "81920"],
-        },
-    },
-    {
-        "name": "lmcache_cpu",
-        "description": "LMCache CPU offloading — sweep chunk sizes and doc lengths",
-        "profile_json": "results_worker0.json",
-        "vllm_args": {
-            "--no-enable-prefix-caching": None,
-            "--kv-transfer-config":
-                '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}',
-        },
-        "env": {
-            "LMCACHE_LOCAL_CPU":          "True",
-            "LMCACHE_MAX_LOCAL_CPU_SIZE": "128",
-            "LMCACHE_CHUNK_SIZE":         ["64"]
-        },
-        "profile_json": "results_worker0.json",
-        # "sharegpt_args": {
-        #     "--request-rate": ["8", "16", "32"]
-        # }
-        "long_doc_qa_args": {
-            "--document-length": ["1024", "10240", "40960", "81920"],
-        },
-    },
-]
+CONFIGS: list[dict[str, Any]] = []
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG EXPANSION  (cartesian product over all list-valued parameters)
@@ -228,6 +168,118 @@ def _expand_dict(d: dict) -> list[tuple[dict, list[tuple[str, Any]]]]:
         varied = [(k, v) for k, v in zip(keys, combo) if isinstance(d[k], list)]
         combos.append((resolved, varied))
     return combos
+
+
+def _stringify_for_cli(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value)
+    return str(value)
+
+
+def _value_for_name(value: Any) -> str:
+    if isinstance(value, dict):
+        if "shared_storage_path" in value.get("kv_connector_extra_config", {}):
+            return value["kv_connector_extra_config"]["shared_storage_path"]
+        return json.dumps(value, sort_keys=True)
+    if isinstance(value, list):
+        return json.dumps(value)
+    return str(value)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run benchmark scenarios from a JSON config file")
+    parser.add_argument(
+        "--config",
+        default=DEFAULT_CONFIG_PATH,
+        help=f"Path to benchmark JSON config (default: {DEFAULT_CONFIG_PATH})",
+    )
+    parser.add_argument(
+        "--shared-storage-path",
+        type=str,
+        default=None,
+        help="Override shared_storage_path inside any kv-transfer-config payload",
+    )
+    return parser.parse_args()
+
+
+def _require_config_key(config: dict[str, Any], key: str) -> Any:
+    if key not in config:
+        raise ValueError(f"Missing required config key: {key}")
+    return config[key]
+
+
+def load_config(path: str) -> dict[str, Any]:
+    with open(path) as f:
+        config = json.load(f)
+
+    if not isinstance(config, dict):
+        raise ValueError("Top-level benchmark config must be a JSON object")
+    if not isinstance(config.get("configs"), list) or not config["configs"]:
+        raise ValueError("Config file must contain a non-empty 'configs' array")
+    return config
+
+
+def apply_loaded_config(config: dict[str, Any]) -> None:
+    global MODEL, MAX_MODEL_LEN, GPU_MEM_UTIL, VLLM_PORT, N_REPETITIONS
+    global SERVER_STARTUP_TIMEOUT, FLUSH_MODE, FLUSH_NUM_DOCS, FLUSH_DOC_LENGTH
+    global FLUSH_MAX_INFLIGHT, LONG_DOC_QA_SCRIPT, LONG_DOC_QA_DEFAULTS
+    global SHAREGPT_DATASET_PATH, SHAREGPT_DEFAULTS, CONFIGS, OUTPUT_DIR, OUTPUT_CSV
+
+    MODEL = _require_config_key(config, "model")
+    MAX_MODEL_LEN = int(_require_config_key(config, "max_model_len"))
+    GPU_MEM_UTIL = float(_require_config_key(config, "gpu_mem_util"))
+    VLLM_PORT = int(_require_config_key(config, "vllm_port"))
+    N_REPETITIONS = int(config.get("n_repetitions", 1))
+    SERVER_STARTUP_TIMEOUT = int(config.get("server_startup_timeout", 200))
+
+    FLUSH_MODE = bool(config.get("flush_mode", False))
+    flush_cfg = dict(config.get("flush", {}))
+    FLUSH_NUM_DOCS = int(flush_cfg.get("num_documents", 2))
+    FLUSH_DOC_LENGTH = int(flush_cfg.get("document_length", 90000))
+    FLUSH_MAX_INFLIGHT = int(flush_cfg.get("max_inflight_requests", 1))
+
+    LONG_DOC_QA_SCRIPT = _require_config_key(config, "long_doc_qa_script")
+    LONG_DOC_QA_DEFAULTS = dict(config.get("long_doc_qa_defaults", {}))
+    SHAREGPT_DATASET_PATH = _require_config_key(config, "sharegpt_dataset_path")
+    SHAREGPT_DEFAULTS = dict(config.get("sharegpt_defaults", {}))
+    CONFIGS = list(config["configs"])
+
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_prefix = str(config.get("output_prefix", "kv_benchmark"))
+    OUTPUT_DIR = f"{output_prefix}_{run_timestamp}"
+    OUTPUT_CSV = f"{output_prefix}_results_{run_timestamp}.csv"
+
+
+def resolve_scratch_path(override_path: Optional[str]) -> None:
+    for config in CONFIGS:
+        resolved = resolve_scratch_path_for_config(config, override_path)
+        if resolved:
+            print(f"  {config.get('name', 'config')} shared_storage_path -> {resolved}")
+
+
+def get_shared_storage_path(config: dict[str, Any]) -> Optional[str]:
+    kv_transfer_cfg = config.get("vllm_args", {}).get("--kv-transfer-config")
+    if kv_transfer_cfg is None:
+        return None
+    if isinstance(kv_transfer_cfg, str):
+        try:
+            kv_transfer_cfg = json.loads(kv_transfer_cfg)
+        except json.JSONDecodeError:
+            return None
+    return kv_transfer_cfg.get("kv_connector_extra_config", {}).get("shared_storage_path")
+
+
+def wipe_shared_storage(config: dict[str, Any]) -> None:
+    shared_storage_path = get_shared_storage_path(config)
+    if not shared_storage_path:
+        return
+    if os.path.exists(shared_storage_path):
+        shutil.rmtree(shared_storage_path)
+        print(f"  Wiped shared storage: {shared_storage_path}")
+    else:
+        print(f"  Shared storage path not present: {shared_storage_path}")
+    print("  Sleeping 15s after shared storage wipe...")
+    time.sleep(15)
 
 
 def _merge_long_doc_qa_args(config: dict) -> dict:
@@ -275,22 +327,23 @@ def expand_config(cfg: dict) -> list[dict]:
     ):
         varied_parts = []
         for k, v in vllm_varied:
-            varied_parts.append(f"{k.lstrip('-').replace('-','_')}={v}")
+            varied_parts.append(f"{k.lstrip('-').replace('-','_')}={_value_for_name(v)}")
         for k, v in env_varied:
-            varied_parts.append(f"{k}={v}")
+            varied_parts.append(f"{k}={_value_for_name(v)}")
         for k, v in bench_varied:
-            varied_parts.append(f"{k.lstrip('-').replace('-','_')}={v}")
+            varied_parts.append(f"{k.lstrip('-').replace('-','_')}={_value_for_name(v)}")
 
         sub_name = f"{cfg['name']}[{','.join(varied_parts)}]" if varied_parts else cfg["name"]
 
         expanded.append({
-            "name":         sub_name,
-            "description":  cfg.get("description", ""),
-            "benchmark":    benchmark,
-            "vllm_args":    vllm_args,
-            "env":          env,
-            bench_key:      bench_args,
-            "profile_json": cfg.get("profile_json", None),
+            "name":              sub_name,
+            "base_config_name":  cfg["name"],
+            "description":       cfg.get("description", ""),
+            "benchmark":         benchmark,
+            "vllm_args":         vllm_args,
+            "env":               env,
+            bench_key:            bench_args,
+            "profile_json":      cfg.get("profile_json", None),
         })
     return expanded
 
@@ -308,8 +361,14 @@ def all_expanded_configs(configs: list[dict]) -> list[dict]:
 @dataclass
 class BenchmarkResult:
     config_name:              str
+    base_config_name:         str
     config_description:       str
+    benchmark:                str
     repetition:               int
+    doc_len:                  Optional[int]   = None
+    request_rate:             Optional[float] = None
+    batch_size:               Optional[int]   = None
+    chunk_size:               Optional[int]   = None
     # warmup round
     warmup_mean_ttft_s:       Optional[float] = None
     warmup_total_time_s:      Optional[float] = None
@@ -359,7 +418,7 @@ def build_vllm_command(vllm_args: dict) -> list[str]:
     for flag, value in vllm_args.items():
         cmd.append(flag)
         if value is not None:
-            cmd.append(str(value))
+            cmd.append(_stringify_for_cli(value))
     return cmd
 
 
@@ -372,7 +431,7 @@ def build_long_doc_qa_command(lmdqa_args: dict) -> list[str]:
     for flag, value in lmdqa_args.items():
         cmd.append(flag)
         if value is not None:
-            cmd.append(str(value))
+            cmd.append(_stringify_for_cli(value))
     return cmd
 
 
@@ -391,7 +450,7 @@ def build_sharegpt_command(sharegpt_args: dict, result_json_path: str) -> list[s
     for flag, value in sharegpt_args.items():
         cmd.append(flag)
         if value is not None:
-            cmd.append(str(value))
+            cmd.append(_stringify_for_cli(value))
     return cmd
 
 
@@ -400,6 +459,9 @@ def run_sharegpt_benchmark(sharegpt_args: dict, result_json_path: str) -> Option
     print(f"\n  ▶  Running sharegpt benchmark: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True)
     print(result.stdout + "\n" + result.stderr)
+    if result.returncode != 0:
+        print(f"  ✗  ShareGPT benchmark exited with code {result.returncode}")
+        return None
     return parse_sharegpt_result(result_json_path)
 
 
@@ -479,6 +541,9 @@ def run_long_doc_qa(lmdqa_args: dict, csv_path: str) -> Optional[dict]:
     print(f"\n  ▶  Running benchmark: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True)
     print(result.stdout + "\n" + result.stderr)
+    if result.returncode != 0:
+        print(f"  ✗  Benchmark exited with code {result.returncode}")
+        return None
     try:
         return parse_csv(csv_path)
     except Exception as e:
@@ -528,75 +593,19 @@ def parse_csv(csv_path: str) -> dict:
     return parsed
 
 
-def parse_profile_json(json_path: str) -> list[dict]:
-    """
-    Parse a simple-profiler trace JSON and return one record per GPU transfer
-    kernel call.  Each record has:
-        direction   : "to_gpu" or "from_gpu"
-        ts_us       : event start timestamp (µs)
-        dur_us      : kernel duration (µs)
-        num_bytes   : bytes transferred (if available, else empty)
-
-    Recognised event names:
-      - VLLMPagedMemGPUConnectorV2.to_gpu.kernel / .from_gpu.kernel
-      - cuda_transfer(cpu_to_gpu)                / cuda_transfer(gpu_to_cpu)
-    """
-    with open(json_path) as f:
-        data = json.load(f)
-    events = data.get("traceEvents", data) if isinstance(data, dict) else data
-
-    TO_GPU_NAMES   = {"VLLMPagedMemGPUConnectorV2.to_gpu.kernel", "cuda_transfer(cpu_to_gpu)"}
-    FROM_GPU_NAMES = {"VLLMPagedMemGPUConnectorV2.from_gpu.kernel", "cuda_transfer(gpu_to_cpu)"}
-
-    transfers = []
-    for e in events:
-        if not isinstance(e, dict):
-            continue
-        name = e.get("name", "")
-        if name in TO_GPU_NAMES:
-            direction = "to_gpu"
-        elif name in FROM_GPU_NAMES:
-            direction = "from_gpu"
-        else:
-            continue
-        transfers.append({
-            "direction": direction,
-            "ts_us":     e.get("ts", ""),
-            "dur_us":    e.get("dur", ""),
-            "num_bytes": (e.get("args") or {}).get("num_bytes", ""),
-        })
-    return transfers
-
-
-def write_gpu_transfer_csv(transfers: list[dict], path: str) -> None:
-    with open(path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["direction", "ts_us", "dur_us", "num_bytes"])
-        writer.writeheader()
-        writer.writerows(transfers)
-
-
-def find_and_parse_profile(profile_json: Optional[str]) -> Optional[list[dict]]:
-    """Parse the config's profile_json file if set, or return None."""
-    if not profile_json:
-        return None
+def save_profile(profile_json: Optional[str], run_num: int) -> Optional[str]:
     try:
-        return parse_profile_json(profile_json)
+        return save_profile_artifacts(profile_json, OUTPUT_DIR, f"run_{run_num:03d}")
     except Exception as e:
         print(f"  ⚠  Could not parse profile JSON '{profile_json}': {e}")
-    return None
+        return None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CSV OUTPUT
 # ─────────────────────────────────────────────────────────────────────────────
 
-CSV_FIELDS = list(BenchmarkResult.__dataclass_fields__.keys())
-
 def write_csv(results: list[BenchmarkResult], path: str) -> None:
-    with open(path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-        writer.writeheader()
-        for r in results:
-            writer.writerow(asdict(r))
+    write_dataclass_csv(results, path)
     print(f"\n✅  Results written to: {path}")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -631,6 +640,9 @@ def run_long_doc_qa_query_only(lmdqa_args: dict, csv_path: str) -> Optional[dict
     print(f"\n  ▶  [flush] Query-only pass: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True)
     print(result.stdout + "\n" + result.stderr)
+    if result.returncode != 0:
+        print(f"  ✗  Query-only benchmark exited with code {result.returncode}")
+        return None
     try:
         return parse_csv(csv_path)
     except Exception as e:
@@ -638,11 +650,34 @@ def run_long_doc_qa_query_only(lmdqa_args: dict, csv_path: str) -> Optional[dict
         return None
 
 
+def extract_result_metadata(config: dict) -> dict[str, Any]:
+    benchmark = config.get("benchmark", "long_doc_qa")
+    long_doc_args = config.get("long_doc_qa_args", {})
+    sharegpt_args = config.get("sharegpt_args", {})
+
+    doc_len = long_doc_args.get("--document-length")
+    request_rate = sharegpt_args.get("--request-rate")
+    batch_size = config.get("vllm_args", {}).get("--max-num-batched-tokens")
+    chunk_size = config.get("env", {}).get("LMCACHE_CHUNK_SIZE")
+
+    return {
+        "doc_len": int(doc_len) if doc_len is not None else None,
+        "request_rate": float(request_rate) if request_rate is not None else None,
+        "batch_size": int(batch_size) if batch_size is not None else None,
+        "chunk_size": int(chunk_size) if chunk_size is not None else None,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN LOOP
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
+    args = parse_args()
+    loaded_config = load_config(args.config)
+    apply_loaded_config(loaded_config)
+    resolve_scratch_path(args.shared_storage_path)
+
     if not Path(LONG_DOC_QA_SCRIPT).exists():
         print(f"ERROR: long_doc_qa.py not found at '{LONG_DOC_QA_SCRIPT}'.")
         print("Clone LMCache first:  git clone https://github.com/LMCache/LMCache.git")
@@ -673,11 +708,15 @@ def main():
 
             result = BenchmarkResult(
                 config_name=config["name"],
+                base_config_name=config["base_config_name"],
                 config_description=config["description"],
+                benchmark=config.get("benchmark", "long_doc_qa"),
                 repetition=rep,
+                **extract_result_metadata(config),
             )
 
             server_proc = None
+            profile_json_path = config.get("profile_json")
             try:
                 server_log = os.path.join(OUTPUT_DIR, f"run_{run_num:03d}_server.log")
                 server_proc = start_server(config, server_log)
@@ -717,16 +756,6 @@ def main():
                             if hasattr(result, key):
                                 setattr(result, key, val)
 
-                profile_json_path = config.get("profile_json")
-                if profile_json_path and os.path.exists(profile_json_path):
-                    saved_json = os.path.join(OUTPUT_DIR, f"run_{run_num:03d}_profile.json")
-                    shutil.copy2(profile_json_path, saved_json)
-                transfers = find_and_parse_profile(profile_json_path)
-                if transfers is not None:
-                    transfer_csv = os.path.join(OUTPUT_DIR, f"run_{run_num:03d}_gpu_transfers.csv")
-                    write_gpu_transfer_csv(transfers, transfer_csv)
-                    result.gpu_transfer_csv = transfer_csv
-
                 if benchmark == "sharegpt":
                     if result.sg_completed is None:
                         result.error = "Could not parse sharegpt result JSON"
@@ -741,7 +770,11 @@ def main():
                 if server_proc:
                     stop_server(server_proc)
 
+            result.gpu_transfer_csv = save_profile(profile_json_path, run_num)
+            wipe_shared_storage(config)
+
             all_results.append(result)
+            write_csv(all_results, OUTPUT_CSV)
 
             if result.error:
                 print(f"\n  Result: ERROR — {result.error}")
@@ -760,8 +793,6 @@ def main():
                 print(f"    Query TTFT  : {result.query_mean_ttft_s}s")
                 print(f"    Speedup     : {result.ttft_speedup_x}x")
                 print(f"    Time saved  : {result.time_reduction_pct}%")
-
-    write_csv(all_results, OUTPUT_CSV)
 
     print(f"\n{'═'*70}")
     print("  SUMMARY")

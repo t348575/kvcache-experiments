@@ -1,0 +1,46 @@
+{
+  "model": "meta-llama/Llama-3.2-3B-Instruct",
+  "max_model_len": 92000,
+  "gpu_mem_util": 0.9,
+  "vllm_port": 8000,
+  "n_repetitions": 1,
+  "server_startup_timeout": 200,
+  "output_prefix": "bench_native_offload",
+  "flush_mode": false,
+  "flush": {
+    "num_documents": 2,
+    "document_length": 90000,
+    "max_inflight_requests": 1
+  },
+  "long_doc_qa_script": "lmcache_long_doc_qa.py",
+  "long_doc_qa_defaults": {
+    "--num-documents": "5",
+    "--document-length": ["1024", "10240", "40960", "81920"],
+    "--output-len": "1",
+    "--repeat-count": "5",
+    "--repeat-mode": "random",
+    "--max-inflight-requests": "4"
+  },
+  "sharegpt_dataset_path": "dataset/ShareGPT_V3_unfiltered_cleaned_split.json",
+  "sharegpt_defaults": {
+    "--num-prompts": "100",
+    "--request-rate": "32",
+    "--percentile-metrics": "ttft,tpot,itl",
+    "--metric-percentiles": "95,99",
+    "--output-len": 1
+  },
+  "configs": [
+    {
+      "name": "native_offload",
+      "description": "vLLM native KV offloading",
+      "profile_json": "results_engine_core_0.json",
+      "vllm_args": {
+        "--no-enable-prefix-caching": null,
+        "--kv-offloading-backend": "native",
+        "--kv-offloading-size": "128",
+        "--disable-hybrid-kv-cache-manager": null
+      },
+      "long_doc_qa_args": {}
+    }
+  ]
+}

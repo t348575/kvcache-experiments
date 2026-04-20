@@ -8,31 +8,32 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
 
+from plot_common import plain_number_formatter, save_figure, set_log_y_axis
 
 
-def parse_config_name(name):
-    """Extract strategy, doc_len, and batch_size from config_name.
+def _maybe_int(value):
+    if value in (None, ""):
+        return None
+    return int(float(value))
 
-    Returns (strategy_label, doc_len, batch_size).
-    strategy_label has no doc/batch info embedded (e.g. "vLLM Offloading", "LMCache chunk=64").
-    """
-    doc_m = re.search(r"document_length=(\d+)", name)
-    doc_len = int(doc_m.group(1)) if doc_m else None
 
-    chunk_m = re.search(r"LMCACHE_CHUNK_SIZE=(\d+)", name)
-    chunk_size = int(chunk_m.group(1)) if chunk_m else None
+def _maybe_float(value):
+    if value in (None, ""):
+        return None
+    return float(value)
 
-    batch_m = re.search(r"max_num_batched_tokens=(\d+)", name)
-    batch_size = int(batch_m.group(1)) if batch_m else None
 
-    if name.startswith("offloading"):
-        strategy = "vLLM Offloading"
-    elif name.startswith("baseline"):
-        strategy = "Baseline"
-    else:
-        strategy = f"LMCache chunk={chunk_size}"
+def strategy_label_from_row(row):
+    base_name = row["base_config_name"]
+    chunk_size = _maybe_int(row.get("chunk_size"))
 
-    return strategy, doc_len, batch_size
+    if base_name == "baseline":
+        return "Baseline"
+    if base_name == "offloading":
+        return "vLLM Offloading"
+    if chunk_size is not None:
+        return f"{base_name} chunk={chunk_size}"
+    return base_name
 
 
 def plot_ttft(series, metric_key, title, ylabel, filename, normalize=False, boxplot=True, log=True, xlabel="Document Length (tokens)", xfmt=lambda x: f"{x:,}"):
@@ -102,19 +103,13 @@ def plot_ttft(series, metric_key, title, ylabel, filename, normalize=False, boxp
         ax.axhline(1.0, color="gray", linestyle="--", linewidth=1, alpha=0.7)
     else:
         if log:
-            ax.set_yscale("log", base=10)
-            ax.yaxis.set_major_locator(ticker.LogLocator(base=10, subs=[1], numticks=10))
-            ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"{x:g}"))
-            ax.yaxis.set_minor_locator(ticker.NullLocator())
-            ax.yaxis.set_minor_formatter(ticker.NullFormatter())
+            set_log_y_axis(ax)
         else:
-            ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"{x:g}"))
+            ax.yaxis.set_major_formatter(ticker.FuncFormatter(plain_number_formatter))
     ax.grid(axis="y", linestyle="--", alpha=0.5)
     ax.grid(axis="x", visible=False)
     ax.xaxis.set_minor_locator(ticker.NullLocator())
-    plt.tight_layout()
-    plt.savefig(filename, dpi=300, bbox_inches="tight")
-    plt.close()
+    save_figure(filename)
 
     print(f"\n── {title} ──")
     for label in active_labels:
@@ -246,15 +241,13 @@ def plot_grouped_bar(series, title, ylabel, filename, log=False):
     if log:
         ax.set_yscale("log")
         ax.yaxis.set_major_locator(ticker.LogLocator(base=10, subs="all", numticks=10))
-        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"{x:g}"))
+        ax.yaxis.set_major_formatter(ticker.FuncFormatter(plain_number_formatter))
         ax.yaxis.set_minor_formatter(ticker.NullFormatter())
     else:
-        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"{x:g}"))
+        ax.yaxis.set_major_formatter(ticker.FuncFormatter(plain_number_formatter))
     ax.legend()
     ax.grid(axis="y", linestyle="--", alpha=0.5)
-    plt.tight_layout()
-    plt.savefig(filename, dpi=300, bbox_inches="tight")
-    plt.close()
+    save_figure(filename)
 
     print(f"\n── {title} ──")
     for strategy, batch in bar_keys:
@@ -274,12 +267,17 @@ def load_into_series(csv_path, warmup_series, query_series,
     csv.field_size_limit(10 * 1024 * 1024)  # 10 MB
     with open(csv_path) as f:
         for row in csv.DictReader(f):
-            strategy, doc_len, batch_size = parse_config_name(row["config_name"])
+            if row.get("benchmark") != "long_doc_qa":
+                continue
+
+            strategy = strategy_label_from_row(row)
+            doc_len = _maybe_int(row.get("doc_len"))
+            batch_size = _maybe_int(row.get("batch_size"))
             if renames:
                 strategy = renames.get(strategy, strategy)
             if prefix:
                 strategy = f"{prefix}: {strategy}"
-            if doc_len in exclude:
+            if doc_len is None or doc_len in exclude:
                 continue
 
             # GPU bar plots: series["{strategy} doc={doc_len}"][batch_size]
@@ -301,7 +299,7 @@ def load_into_series(csv_path, warmup_series, query_series,
                             to_bw.append(gbps)
                         elif tr["direction"] == "from_gpu":
                             from_bw.append(gbps)
-                is_lmcache = row["config_name"].startswith("lmcache")
+                is_lmcache = row["base_config_name"].startswith("lmcache")
                 if is_lmcache:
                     to_bw, from_bw = from_bw, to_bw
                 to_gpu_series[gpu_label][batch_size].extend(to_bw)
@@ -340,17 +338,16 @@ def load_sharegpt_series(csv_path, sg_series, exclude_rates=None, prefix="", ren
     csv.field_size_limit(10 * 1024 * 1024)
     with open(csv_path) as f:
         for row in csv.DictReader(f):
-            if not row.get("sg_result_json"):
+            if row.get("benchmark") != "sharegpt" or not row.get("sg_result_json"):
                 continue
-            strategy, _, _ = parse_config_name(row["config_name"])
+            strategy = strategy_label_from_row(row)
             if renames:
                 strategy = renames.get(strategy, strategy)
             if prefix:
                 strategy = f"{prefix}: {strategy}"
 
-            rate_m = re.search(r"request_rate=(\d+(?:\.\d+)?)", row["config_name"])
-            request_rate = float(rate_m.group(1)) if rate_m else float(row.get("sg_request_rate") or 0)
-            if request_rate in exclude_rates:
+            request_rate = _maybe_float(row.get("request_rate"))
+            if request_rate is None or request_rate in exclude_rates:
                 continue
 
             for metric in SG_METRICS:
@@ -405,11 +402,11 @@ def main():
         load_sharegpt_series(path, sg_series, prefix=name, renames=renames)
 
     plot_ttft(query_series, "query_mean_ttft_s",
-              "(log scale) Query-Round TTFT vs Max Num Batched Tokens", "Query TTFT (s)",
+              "(log scale) Query-Round TTFT vs Document Length", "Query TTFT (s)",
               "query_ttft_vs_doclen.png", normalize=args.normalize, boxplot=not args.no_boxplot, log=not args.no_log)
 
     plot_ttft(warmup_series, "warmup_mean_ttft_s",
-              "Warmup-Round TTFT vs Max Num Batched Tokens", "Warmup TTFT (s)",
+              "Warmup-Round TTFT vs Document Length", "Warmup TTFT (s)",
               "warmup_ttft_vs_doclen.png", normalize=args.normalize, boxplot=not args.no_boxplot, log=not args.no_log)
 
     combined_series = defaultdict(lambda: defaultdict(list))
@@ -421,7 +418,7 @@ def main():
             combined_series[label][doc_len].extend(vals)
 
     plot_ttft(combined_series, None,
-              "Combined TTFT vs Max Num Batched Tokens", "TTFT (s)",
+              "Combined TTFT vs Document Length", "TTFT (s)",
               "combined_ttft_vs_doclen.png", normalize=args.normalize, boxplot=not args.no_boxplot, log=not args.no_log)
 
     print_comparison(query_series,  "Query-Round TTFT")

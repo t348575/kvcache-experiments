@@ -30,12 +30,14 @@ import subprocess
 import sys
 import time
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import requests
+
+from benchmark_common import pct, resolve_scratch_path_for_config, save_profile_artifacts, write_dataclass_csv
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MODEL PRESETS
@@ -415,18 +417,6 @@ def run_benchmark(job: Job, csv_path: str) -> Optional[list[dict]]:
         return None
 
 
-def _pct(values: list[float], p: float) -> float:
-    """Linear-interpolation percentile; p in [0, 100]."""
-    if not values:
-        return float("nan")
-    s = sorted(values)
-    if len(s) == 1:
-        return s[0]
-    idx = p / 100.0 * (len(s) - 1)
-    lo, hi = int(idx), min(int(idx) + 1, len(s) - 1)
-    return s[lo] + (idx - lo) * (s[hi] - s[lo])
-
-
 def parse_rows(rows: list[dict], job: Job) -> Result:
     # For cache_hit: query rows are those with is_prefix_reuse=True.
     # For cold_prefill: all rows are query rows (no warmup).
@@ -455,10 +445,10 @@ def parse_rows(rows: list[dict], job: Job) -> Result:
 
     if ttfts:
         result.ttft_mean_s   = sum(ttfts) / len(ttfts)
-        result.ttft_median_s = _pct(ttfts, 50)
-        result.ttft_p05_s    = _pct(ttfts, 5)
-        result.ttft_p95_s    = _pct(ttfts, 95)
-        result.ttft_p99_s    = _pct(ttfts, 99)
+        result.ttft_median_s = pct(ttfts, 50)
+        result.ttft_p05_s    = pct(ttfts, 5)
+        result.ttft_p95_s    = pct(ttfts, 95)
+        result.ttft_p99_s    = pct(ttfts, 99)
     else:
         result.error = "no successful query rows"
 
@@ -469,58 +459,17 @@ def parse_rows(rows: list[dict], job: Job) -> Result:
 # PROFILE TRACE PARSING
 # ─────────────────────────────────────────────────────────────────────────────
 
-def parse_profile_json(json_path: str) -> list[dict]:
-    """
-    Parse a simple-profiler trace and return one record per GPU transfer kernel.
-    Each record: direction, ts_us, dur_us, num_bytes.
-    """
-    with open(json_path) as f:
-        data = json.load(f)
-    events = data.get("traceEvents", data) if isinstance(data, dict) else data
-
-    transfers = []
-    for e in events:
-        if not isinstance(e, dict):
-            continue
-        name = e.get("name", "")
-        if name.startswith("cuda_transfer("):
-            # Format: cuda_transfer(DIRECTION, job=N) e.g. cuda_transfer(gpu_to_cpu, job=0)
-            inner = name.split("(", 1)[1].rstrip(")")
-            direction = "to_gpu" if "cpu_to_gpu" in inner else "from_gpu"
-        elif name == "VLLMPagedMemGPUConnectorV2.to_gpu.kernel":
-            direction = "to_gpu"
-        elif name == "VLLMPagedMemGPUConnectorV2.from_gpu.kernel":
-            direction = "from_gpu"
-        else:
-            continue
-        transfers.append({
-            "direction": direction,
-            "ts_us":     e.get("ts", ""),
-            "dur_us":    e.get("dur", ""),
-            "num_bytes": (e.get("args") or {}).get("num_bytes", ""),
-        })
-    return transfers
-
-
 def save_profile(job_idx: int) -> Optional[str]:
     """
     Copy and parse PROFILE_JSON (written by simple-profiler) for the current job.
     Returns the path to the saved per-kernel transfer CSV, or None if not found.
     """
-    if not os.path.exists(PROFILE_JSON):
-        return None
-    saved_json = os.path.join(OUTPUT_DIR, f"job_{job_idx:04d}_profile.json")
-    shutil.copy2(PROFILE_JSON, saved_json)
     try:
-        transfers = parse_profile_json(saved_json)
-        if not transfers:
-            return None
-        transfer_csv = os.path.join(OUTPUT_DIR, f"job_{job_idx:04d}_gpu_transfers.csv")
-        with open(transfer_csv, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["direction", "ts_us", "dur_us", "num_bytes"])
-            writer.writeheader()
-            writer.writerows(transfers)
-        print(f"  📊  GPU transfer trace → {transfer_csv}  ({len(transfers)} events)")
+        transfer_csv = save_profile_artifacts(PROFILE_JSON, OUTPUT_DIR, f"job_{job_idx:04d}")
+        if transfer_csv:
+            with open(transfer_csv, newline="") as f:
+                n_events = sum(1 for _ in csv.DictReader(f))
+            print(f"  📊  GPU transfer trace → {transfer_csv}  ({n_events} events)")
         return transfer_csv
     except Exception as e:
         print(f"  ⚠   Could not parse profile JSON: {e}")
@@ -531,15 +480,8 @@ def save_profile(job_idx: int) -> Optional[str]:
 # CSV OUTPUT
 # ─────────────────────────────────────────────────────────────────────────────
 
-CSV_FIELDS = list(Result.__dataclass_fields__.keys())
-
-
 def write_csv(results: list[Result], path: str) -> None:
-    with open(path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-        writer.writeheader()
-        for r in results:
-            writer.writerow(asdict(r))
+    write_dataclass_csv(results, path)
     print(f"  💾  Results → {path}  ({len(results)} rows)")
 
 
@@ -606,34 +548,10 @@ def resolve_scratch_path(override_path: Optional[str]) -> None:
     cfg = SERVER_CONFIGS.get("storage_offload")
     if cfg is None:
         return
-    kv_transfer_str = cfg.get("--kv-transfer-config", "{}")
-    try:
-        cfg_dict = json.loads(kv_transfer_str)
-        extra = cfg_dict.get("kv_connector_extra_config", {})
-    except (json.JSONDecodeError, TypeError, KeyError):
-        return
-
-    if override_path:
-        resolved = override_path
-    elif extra.get("shared_storage_path", "").startswith("/scratch-node"):
-        scratch_root = "/scratch-node"
-        try:
-            entries = os.listdir(scratch_root)
-        except OSError:
-            print(f"  WARNING: could not list {scratch_root}")
-            return
-        matching = sorted(e for e in entries if e.startswith("jkanichai"))
-        if not matching:
-            print(f"  WARNING: no jkanichai* directory found in {scratch_root}")
-            return
-        resolved = os.path.join(scratch_root, matching[0], "llm-d-fs")
-    else:
-        return
-
-    extra["shared_storage_path"] = resolved
-    cfg_dict["kv_connector_extra_config"] = extra
-    cfg["--kv-transfer-config"] = json.dumps(cfg_dict)
-    print(f"  shared_storage_path → {resolved}")
+    wrapper = {"vllm_args": cfg}
+    resolved = resolve_scratch_path_for_config(wrapper, override_path)
+    if resolved:
+        print(f"  shared_storage_path → {resolved}")
 
 
 def main():

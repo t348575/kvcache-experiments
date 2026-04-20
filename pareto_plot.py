@@ -35,7 +35,9 @@ import matplotlib.ticker as mticker
 import numpy as np
 from scipy.interpolate import PchipInterpolator
 
-plt.rcParams.update({"figure.dpi": 150, "font.size": 10})
+from plot_common import configure_plots, save_figure, thousands_formatter, token_k_formatter
+
+configure_plots()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -239,18 +241,14 @@ def plot_ttft_curves(
         ax.set_title(title)
         ax.set_xlabel("Tokens")
         ax.set_ylabel("TTFT (ms)")
-        ax.xaxis.set_major_formatter(
-            mticker.FuncFormatter(lambda x, _: f"{x / 1024:.0f}k")
-        )
+        ax.xaxis.set_major_formatter(mticker.FuncFormatter(token_k_formatter))
         ax.legend()
         ax.grid(True, alpha=0.3)
 
     _plot_curve(axes[0], cold, "cold prefill", "steelblue")
     _plot_curve(axes[1], hit, "cache hit", "tomato")
 
-    plt.tight_layout()
-    plt.savefig(out_path, bbox_inches="tight")
-    plt.close()
+    save_figure(out_path, dpi=150)
     print(f"  Saved {out_path}")
 
 
@@ -351,9 +349,7 @@ def plot_pareto_frontier(
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
 
-    plt.tight_layout()
-    plt.savefig(out_path, bbox_inches="tight")
-    plt.close()
+    save_figure(out_path, dpi=150)
     print(f"  Saved {out_path}")
 
 
@@ -430,9 +426,7 @@ def plot_concurrency(
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
 
-    plt.tight_layout()
-    plt.savefig(out_path, bbox_inches="tight")
-    plt.close()
+    save_figure(out_path, dpi=150)
     print(f"  Saved {out_path}")
 
 
@@ -561,7 +555,7 @@ def plot_io_budget(
     ax1.set_xticklabels(x_labels, rotation=45, ha="right")
     ax1.set_yscale("log")
     ax1.yaxis.set_major_locator(mticker.LogLocator(base=10, subs=[1, 2, 3, 5]))
-    ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.0f}"))
+    ax1.yaxis.set_major_formatter(mticker.FuncFormatter(thousands_formatter))
     ax1.legend(fontsize=8)
     ax1.grid(True, alpha=0.3)
 
@@ -589,9 +583,7 @@ def plot_io_budget(
     ax2.legend(fontsize=8)
     ax2.grid(True, alpha=0.3)
 
-    plt.tight_layout()
-    plt.savefig(out_path, bbox_inches="tight")
-    plt.close()
+    save_figure(out_path, dpi=150)
     print(f"  Saved {out_path}")
 
 
