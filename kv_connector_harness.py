@@ -2,13 +2,12 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import time
 from dataclasses import asdict, dataclass
 from typing import Any
 
-SYNTHETIC_NUM_KV_HEADS = 1
-SYNTHETIC_HEAD_SIZE = 128
 MODEL_DTYPE = "float16"
 CACHE_DTYPE = "auto"
 DEVICE = "cuda"
@@ -30,7 +29,7 @@ class RuntimeConnectorConfig:
     max_num_batched_tokens: int = MAX_NUM_BATCHED_TOKENS
     max_num_seqs: int = MAX_NUM_SEQS
     enable_chunked_prefill: bool = True
-    enable_prefix_caching: bool = True
+    enable_prefix_caching: bool = False
     enable_permute_local_kv: bool = False
     kv_role: str = "kv_both"
     async_scheduling: bool = False
@@ -44,6 +43,10 @@ class ScenarioRequestSpec:
     reuse_source_id: int | None
     reuse_prefix_len: int
     prompt_token_ids: tuple[int, ...]
+    logical_request_id: int | None = None
+    prompt_key: str | None = None
+    traffic_scope: str = "default"
+    target_instance: int | None = None
 
 
 @dataclass
@@ -52,11 +55,155 @@ class ScenarioRequestResult:
     doc_tokens: int
     reuse_source_id: int | None
     reuse_prefix_len: int
+    logical_request_id: int | None
+    prompt_key: str | None
+    traffic_scope: str
+    target_instance: int | None
+    scheduler_steps: int
+    total_scheduled_tokens: int
+    max_scheduled_tokens_per_step: int
+    connector_load_ops: int
+    connector_load_bytes: int
+    connector_load_time_s: float
+    connector_store_ops: int
+    connector_store_bytes: int
+    connector_store_time_s: float
     finished_sending: bool
     finished_recving: bool
     successful: bool
     duration_s: float
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class RuntimePlacement:
+    runtime_kv_device: str
+    runtime_kv_medium: str
+    allocated_on_cpu: bool
+
+
+def _resolve_runtime_placement(extra_config: dict[str, Any] | None) -> RuntimePlacement:
+    connector_extra_config = extra_config or {}
+    skip_gpu_copy = bool(connector_extra_config.get("skip_gpu_copy", False))
+    runtime_kv_device = str(
+        connector_extra_config.get(
+            "runtime_kv_device",
+            "cpu" if skip_gpu_copy else DEVICE,
+        )
+    )
+    runtime_kv_medium = str(
+        connector_extra_config.get(
+            "runtime_kv_medium",
+            "cpu" if runtime_kv_device == "cpu" else "gpu",
+        )
+    ).strip().lower()
+    allocated_on_cpu = runtime_kv_device == "cpu"
+    return RuntimePlacement(
+        runtime_kv_device=runtime_kv_device,
+        runtime_kv_medium=runtime_kv_medium,
+        allocated_on_cpu=allocated_on_cpu,
+    )
+
+
+def estimate_kv_cache_bytes(config: RuntimeConnectorConfig) -> int:
+    placement = _resolve_runtime_placement(config.connector_extra_config)
+    try:
+        import torch
+        from vllm.config import (
+            AttentionConfig,
+            CacheConfig,
+            DeviceConfig,
+            KVTransferConfig,
+            ModelConfig,
+            SchedulerConfig,
+            VllmConfig,
+        )
+        from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheTensor
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "estimate_kv_cache_bytes requires both 'torch' and 'vllm' in the active environment"
+        ) from exc
+
+    dtype = getattr(torch, MODEL_DTYPE, None)
+    if dtype is None:
+        raise ValueError(f"unsupported torch dtype: {MODEL_DTYPE}")
+
+    model_config = ModelConfig(
+        model=config.model_name,
+        trust_remote_code=True,
+        dtype=MODEL_DTYPE,
+        seed=42,
+        hf_overrides={},
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=config.max_num_seqs,
+        max_num_batched_tokens=config.max_num_batched_tokens,
+        max_model_len=MAX_MODEL_LEN,
+        enable_chunked_prefill=config.enable_chunked_prefill,
+        is_encoder_decoder=model_config.is_encoder_decoder,
+        async_scheduling=config.async_scheduling,
+        disable_hybrid_kv_cache_manager=True,
+    )
+    cache_config = CacheConfig(
+        block_size=config.block_size,
+        gpu_memory_utilization=0.9,
+        cache_dtype=CACHE_DTYPE,
+        enable_prefix_caching=config.enable_prefix_caching,
+    )
+    kv_transfer_config = KVTransferConfig(
+        kv_connector=config.connector_name,
+        kv_connector_module_path=config.connector_module_path,
+        kv_role=config.kv_role,
+        enable_permute_local_kv=config.enable_permute_local_kv,
+        kv_connector_extra_config={
+            **(config.connector_extra_config or {}),
+            "runtime_kv_medium": placement.runtime_kv_medium,
+        },
+        kv_load_failure_policy=config.kv_load_failure_policy,
+    )
+    vllm_config = VllmConfig(
+        scheduler_config=scheduler_config,
+        model_config=model_config,
+        cache_config=cache_config,
+        kv_transfer_config=kv_transfer_config,
+        device_config=DeviceConfig(placement.runtime_kv_device),
+        attention_config=AttentionConfig(),
+    )
+    parallel_config = vllm_config.parallel_config
+    num_layers = model_config.get_num_layers(parallel_config)
+    num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+    head_size = model_config.get_head_size()
+    kv_cache_spec = FullAttentionSpec(
+        block_size=config.block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=dtype,
+    )
+    kv_cache_tensor = KVCacheTensor(
+        size=kv_cache_spec.page_size_bytes * config.num_blocks,
+        shared_by=["layer0"],
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=config.num_blocks,
+        kv_cache_tensors=[kv_cache_tensor for _ in range(num_layers)],
+        kv_cache_groups=[],
+    )
+    return sum(tensor.size for tensor in kv_cache_config.kv_cache_tensors)
+
+
+def get_free_cuda_bytes() -> list[int]:
+    try:
+        import torch
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("get_free_cuda_bytes requires torch in the active environment") from exc
+
+    if not torch.cuda.is_available():
+        return []
+    free_bytes: list[int] = []
+    for device_idx in range(torch.cuda.device_count()):
+        with torch.cuda.device(device_idx):
+            free_bytes.append(int(torch.cuda.mem_get_info()[0]))
+    return free_bytes
 
 
 def parse_int_range(value: str) -> tuple[int, int]:
@@ -93,33 +240,41 @@ def build_request_specs(
     store_pct: float,
     prefix_reuse_range: tuple[float, float],
     seed: int,
+    request_id_base: int = 0,
 ) -> list[ScenarioRequestSpec]:
     if not 0.0 <= store_pct <= 1.0:
         raise ValueError("store_pct must be in [0.0, 1.0]")
 
     rng = random.Random(seed)
     requests: list[ScenarioRequestSpec] = []
-    stored: list[ScenarioRequestSpec] = []
 
-    for request_id in range(num_requests):
+    for local_request_id in range(num_requests):
+        request_id = request_id_base + local_request_id
         doc_tokens = rng.randint(*doc_size_range)
-        should_store = not stored or rng.random() < store_pct
+        corpus_doc = ScenarioRequestSpec(
+            request_id=request_id,
+            doc_tokens=doc_tokens,
+            reuse_source_id=None,
+            reuse_prefix_len=0,
+            prompt_token_ids=tuple(
+                _corpus_token(request_id, token_idx) for token_idx in range(doc_tokens)
+            ),
+        )
+        should_store = rng.random() < store_pct
         if should_store:
-            prompt_token_ids = tuple(
-                _unique_token(request_id, token_idx) for token_idx in range(doc_tokens)
-            )
             request = ScenarioRequestSpec(
                 request_id=request_id,
                 doc_tokens=doc_tokens,
                 reuse_source_id=None,
                 reuse_prefix_len=0,
-                prompt_token_ids=prompt_token_ids,
+                prompt_token_ids=corpus_doc.prompt_token_ids,
+                logical_request_id=request_id,
+                prompt_key=f"request-{request_id}",
             )
             requests.append(request)
-            stored.append(request)
             continue
 
-        source = rng.choice(stored)
+        source = corpus_doc
         reuse_frac = rng.uniform(*prefix_reuse_range)
         reuse_prefix_len = min(
             doc_tokens,
@@ -138,6 +293,8 @@ def build_request_specs(
                 reuse_source_id=source.request_id,
                 reuse_prefix_len=reuse_prefix_len,
                 prompt_token_ids=prompt_token_ids,
+                logical_request_id=request_id,
+                prompt_key=f"request-{request_id}",
             )
         )
 
@@ -152,10 +309,19 @@ def _unique_token(request_id: int, token_idx: int) -> int:
     return request_id * 1_000_000 + token_idx + 1
 
 
+def _corpus_token(corpus_doc_id: int, token_idx: int) -> int:
+    return corpus_doc_id * 1_000_000 + token_idx + 1
+
+
 class RuntimeKVConnectorHarness:
     def __init__(self, config: RuntimeConnectorConfig):
         self.config = config
         self._runtime: dict[str, Any] | None = None
+        self._placement = _resolve_runtime_placement(config.connector_extra_config)
+
+    @property
+    def placement(self) -> RuntimePlacement:
+        return self._placement
 
     def _ensure_runtime(self) -> dict[str, Any]:
         if self._runtime is not None:
@@ -180,6 +346,9 @@ class RuntimeKVConnectorHarness:
                 KVConnectorFactory,
             )
             from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
+            from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+                OffloadingConnectorMetadata,
+            )
             from vllm.forward_context import ForwardContext
             from vllm.v1.core.sched.output import CachedRequestData
             from vllm.v1.core.sched.scheduler import Scheduler
@@ -214,7 +383,10 @@ class RuntimeKVConnectorHarness:
         if dtype is None:
             raise ValueError(f"unsupported torch dtype: {MODEL_DTYPE}")
 
-        device = torch.device(DEVICE)
+        device = torch.device(self._placement.runtime_kv_device)
+        connector_extra_config = dict(self.config.connector_extra_config or {})
+        connector_extra_config["runtime_kv_device"] = self._placement.runtime_kv_device
+        connector_extra_config["runtime_kv_medium"] = self._placement.runtime_kv_medium
 
         model_config = ModelConfig(
             model=self.config.model_name,
@@ -243,7 +415,7 @@ class RuntimeKVConnectorHarness:
             kv_connector_module_path=self.config.connector_module_path,
             kv_role=self.config.kv_role,
             enable_permute_local_kv=self.config.enable_permute_local_kv,
-            kv_connector_extra_config=self.config.connector_extra_config or {},
+            kv_connector_extra_config=connector_extra_config,
             kv_load_failure_policy=self.config.kv_load_failure_policy,
         )
         vllm_config = VllmConfig(
@@ -255,10 +427,16 @@ class RuntimeKVConnectorHarness:
             attention_config=AttentionConfig(),
         )
 
+        parallel_config = vllm_config.parallel_config
+        num_layers = model_config.get_num_layers(parallel_config)
+        num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+        head_size = model_config.get_head_size()
+        layer_names = [f"layer{i}" for i in range(num_layers)]
+
         kv_cache_spec = FullAttentionSpec(
             block_size=self.config.block_size,
-            num_kv_heads=SYNTHETIC_NUM_KV_HEADS,
-            head_size=SYNTHETIC_HEAD_SIZE,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
             dtype=dtype,
         )
         kv_cache_config = KVCacheConfig(
@@ -266,10 +444,11 @@ class RuntimeKVConnectorHarness:
             kv_cache_tensors=[
                 KVCacheTensor(
                     size=kv_cache_spec.page_size_bytes * self.config.num_blocks,
-                    shared_by=["layer0"],
+                    shared_by=[layer_name],
                 )
+                for layer_name in layer_names
             ],
-            kv_cache_groups=[KVCacheGroupSpec(["layer0"], kv_cache_spec)],
+            kv_cache_groups=[KVCacheGroupSpec(layer_names, kv_cache_spec)],
         )
         vllm_config.cache_config.num_gpu_blocks = self.config.num_blocks
 
@@ -297,10 +476,11 @@ class RuntimeKVConnectorHarness:
                 else "layer_dict"
             )
 
+        module_name, _, class_name = CROSS_LAYER_BACKEND_PATH.partition(":")
+        backend_module = importlib.import_module(module_name)
+        backend_cls = getattr(backend_module, class_name)
+
         if cache_mode == "cross_layer":
-            module_name, _, class_name = CROSS_LAYER_BACKEND_PATH.partition(":")
-            backend_module = importlib.import_module(module_name)
-            backend_cls = getattr(backend_module, class_name)
             with set_current_vllm_config(vllm_config):
                 _, cross_layers_kv_cache, _ = (
                     KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
@@ -309,7 +489,7 @@ class RuntimeKVConnectorHarness:
                             [
                                 AttentionGroup(
                                     backend=backend_cls,
-                                    layer_names=["layer0"],
+                                    layer_names=layer_names,
                                     kv_cache_spec=kv_cache_spec,
                                     kv_cache_group_id=0,
                                 )
@@ -325,23 +505,29 @@ class RuntimeKVConnectorHarness:
                     attn_backend=backend_cls,
                 )
         elif cache_mode == "layer_dict":
-            layer_tensor = torch.zeros(
-                (
-                    2,
-                    self.config.num_blocks,
-                    self.config.block_size,
-                    SYNTHETIC_NUM_KV_HEADS,
-                    SYNTHETIC_HEAD_SIZE,
-                ),
-                dtype=dtype,
+            kv_caches, _, _ = KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
+                kv_cache_config=kv_cache_config,
+                attn_groups=[
+                    [
+                        AttentionGroup(
+                            backend=backend_cls,
+                            layer_names=layer_names,
+                            kv_cache_spec=kv_cache_spec,
+                            kv_cache_group_id=0,
+                        )
+                    ]
+                ],
+                cache_dtype=CACHE_DTYPE,
                 device=device,
+                kernel_block_sizes=[self.config.block_size],
             )
-            worker_connector.register_kv_caches({"layer0": layer_tensor})
+            worker_connector.register_kv_caches(kv_caches)
         else:
             raise ValueError(
                 "register_cache_mode must be one of: auto, cross_layer, layer_dict"
             )
 
+        os.environ.setdefault("PYTHONHASHSEED", "0")
         init_none_hash(sha256)
         dummy_ctx = ForwardContext(
             no_compile_layers={}, attn_metadata={}, slot_mapping={}
@@ -354,6 +540,7 @@ class RuntimeKVConnectorHarness:
             "EMPTY_MODEL_RUNNER_OUTPUT": EMPTY_MODEL_RUNNER_OUTPUT,
             "KVConnectorOutput": KVConnectorOutput,
             "ModelRunnerOutput": ModelRunnerOutput,
+            "OffloadingConnectorMetadata": OffloadingConnectorMetadata,
             "Request": Request,
             "get_request_block_hasher": get_request_block_hasher,
             "sha256": sha256,
@@ -361,6 +548,7 @@ class RuntimeKVConnectorHarness:
             "scheduler_connector": scheduler_connector,
             "worker_connector": worker_connector,
             "dummy_ctx": dummy_ctx,
+            "placement": self._placement,
         }
         return self._runtime
 
@@ -402,12 +590,64 @@ class RuntimeKVConnectorHarness:
         return ModelRunnerOutput(
             req_ids=req_ids,
             req_id_to_index={req_id: idx for idx, req_id in enumerate(req_ids)},
-            sampled_token_ids=[[0] for _ in req_ids],
+            sampled_token_ids=[[] if req.is_prefill_chunk else [0] for req in reqs],
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=None,
             kv_connector_output=kv_connector_output,
         )
+
+    def _get_pending_store_jobs(
+        self, worker_connector: Any, req_key: str
+    ) -> set[int] | None:
+        connector_worker = getattr(worker_connector, "connector_worker", None)
+        if connector_worker is None:
+            return None
+        store_jobs = getattr(connector_worker, "_store_jobs", None)
+        if store_jobs is None:
+            return None
+        pending = store_jobs.get(req_key)
+        return set(pending) if pending is not None else None
+
+    def _empty_connector_stats_summary(self) -> dict[str, int | float]:
+        return {
+            "connector_load_ops": 0,
+            "connector_load_bytes": 0,
+            "connector_load_time_s": 0.0,
+            "connector_store_ops": 0,
+            "connector_store_bytes": 0,
+            "connector_store_time_s": 0.0,
+        }
+
+    def _collect_connector_stats(self, worker_connector: Any) -> dict[str, int | float]:
+        stats = worker_connector.get_kv_connector_stats()
+        summary = self._empty_connector_stats_summary()
+        if stats is None or stats.is_empty():
+            return summary
+
+        for transfer_type, ops in stats.data.items():
+            if not isinstance(ops, list):
+                continue
+            total_bytes = 0
+            total_time = 0.0
+            for op in ops:
+                if hasattr(op, "op_size"):
+                    total_bytes += int(op.op_size)
+                    total_time += float(op.op_time)
+                elif isinstance(op, dict):
+                    total_bytes += int(op.get("op_size", 0))
+                    total_time += float(op.get("op_time", 0.0))
+
+            if transfer_type.endswith("_to_GPU"):
+                summary["connector_load_ops"] += len(ops)
+                summary["connector_load_bytes"] += total_bytes
+                summary["connector_load_time_s"] += total_time
+            elif transfer_type.startswith("GPU_to_"):
+                summary["connector_store_ops"] += len(ops)
+                summary["connector_store_bytes"] += total_bytes
+                summary["connector_store_time_s"] += total_time
+
+        return summary
 
     def run_request(self, spec: ScenarioRequestSpec) -> ScenarioRequestResult:
         runtime = self._ensure_runtime()
@@ -416,10 +656,16 @@ class RuntimeKVConnectorHarness:
         dummy_ctx = runtime["dummy_ctx"]
         EMPTY_MODEL_RUNNER_OUTPUT = runtime["EMPTY_MODEL_RUNNER_OUTPUT"]
         KVConnectorOutput = runtime["KVConnectorOutput"]
+        OffloadingConnectorMetadata = runtime["OffloadingConnectorMetadata"]
 
         request = self._make_request(spec)
+        req_key = request.request_id
         finished_sending_all: set[str] = set()
         finished_recving_all: set[str] = set()
+        scheduler_steps = 0
+        total_scheduled_tokens = 0
+        max_scheduled_tokens_per_step = 0
+        connector_stats_summary = self._empty_connector_stats_summary()
         start = time.time()
 
         try:
@@ -427,6 +673,15 @@ class RuntimeKVConnectorHarness:
 
             while scheduler.requests:
                 scheduler_output = scheduler.schedule()
+                if scheduler_output.total_num_scheduled_tokens > 0:
+                    scheduler_steps += 1
+                    total_scheduled_tokens += (
+                        scheduler_output.total_num_scheduled_tokens
+                    )
+                    max_scheduled_tokens_per_step = max(
+                        max_scheduled_tokens_per_step,
+                        scheduler_output.total_num_scheduled_tokens,
+                    )
                 kv_connector_metadata = scheduler_output.kv_connector_metadata
                 if kv_connector_metadata is not None:
                     worker_connector.handle_preemptions(kv_connector_metadata)
@@ -450,26 +705,75 @@ class RuntimeKVConnectorHarness:
                 )
                 scheduler.update_from_output(scheduler_output, model_runner_output)
 
-            while scheduler.requests:
-                scheduler_output = scheduler.schedule()
+            flush_metadata = OffloadingConnectorMetadata(
+                reqs_to_load={},
+                reqs_to_store={},
+                reqs_to_flush={req_key},
+            )
+            worker_connector.bind_connector_metadata(flush_metadata)
+            worker_connector.handle_preemptions(flush_metadata)
+            worker_connector.start_load_kv(dummy_ctx)
+            worker_connector.clear_connector_metadata()
+
+            finished_sending, finished_recving = worker_connector.get_finished(set())
+            finished_sending_all |= finished_sending
+            finished_recving_all |= finished_recving
+
+            pending_store_jobs = self._get_pending_store_jobs(worker_connector, req_key)
+            if pending_store_jobs:
+                flush_deadline = time.time() + 30.0
+                while pending_store_jobs and time.time() < flush_deadline:
+                    time.sleep(0.01)
+                    finished_sending, finished_recving = worker_connector.get_finished(
+                        set()
+                    )
+                    finished_sending_all |= finished_sending
+                    finished_recving_all |= finished_recving
+                    pending_store_jobs = self._get_pending_store_jobs(
+                        worker_connector, req_key
+                    )
+
                 finished_sending, finished_recving = worker_connector.get_finished(
-                    scheduler_output.finished_req_ids
+                    {req_key}
                 )
                 finished_sending_all |= finished_sending
                 finished_recving_all |= finished_recving
-                model_runner_output = EMPTY_MODEL_RUNNER_OUTPUT
-                model_runner_output.kv_connector_output = KVConnectorOutput(
-                    finished_sending=finished_sending,
-                    finished_recving=finished_recving,
-                )
-                scheduler.update_from_output(scheduler_output, model_runner_output)
+
+                if req_key not in finished_sending_all:
+                    raise RuntimeError(
+                        f"timed out waiting for deferred KV store flush for {req_key}"
+                    )
+
+            connector_stats_summary = self._collect_connector_stats(worker_connector)
 
         except Exception as exc:
+            connector_stats_summary = self._collect_connector_stats(worker_connector)
             return ScenarioRequestResult(
                 request_id=spec.request_id,
                 doc_tokens=spec.doc_tokens,
                 reuse_source_id=spec.reuse_source_id,
                 reuse_prefix_len=spec.reuse_prefix_len,
+                logical_request_id=spec.logical_request_id,
+                prompt_key=spec.prompt_key,
+                traffic_scope=spec.traffic_scope,
+                target_instance=spec.target_instance,
+                scheduler_steps=scheduler_steps,
+                total_scheduled_tokens=total_scheduled_tokens,
+                max_scheduled_tokens_per_step=max_scheduled_tokens_per_step,
+                connector_load_ops=int(connector_stats_summary["connector_load_ops"]),
+                connector_load_bytes=int(
+                    connector_stats_summary["connector_load_bytes"]
+                ),
+                connector_load_time_s=float(
+                    connector_stats_summary["connector_load_time_s"]
+                ),
+                connector_store_ops=int(connector_stats_summary["connector_store_ops"]),
+                connector_store_bytes=int(
+                    connector_stats_summary["connector_store_bytes"]
+                ),
+                connector_store_time_s=float(
+                    connector_stats_summary["connector_store_time_s"]
+                ),
                 finished_sending=False,
                 finished_recving=False,
                 successful=False,
@@ -477,12 +781,28 @@ class RuntimeKVConnectorHarness:
                 error=str(exc),
             )
 
-        req_key = request.request_id
         return ScenarioRequestResult(
             request_id=spec.request_id,
             doc_tokens=spec.doc_tokens,
             reuse_source_id=spec.reuse_source_id,
             reuse_prefix_len=spec.reuse_prefix_len,
+            logical_request_id=spec.logical_request_id,
+            prompt_key=spec.prompt_key,
+            traffic_scope=spec.traffic_scope,
+            target_instance=spec.target_instance,
+            scheduler_steps=scheduler_steps,
+            total_scheduled_tokens=total_scheduled_tokens,
+            max_scheduled_tokens_per_step=max_scheduled_tokens_per_step,
+            connector_load_ops=int(connector_stats_summary["connector_load_ops"]),
+            connector_load_bytes=int(connector_stats_summary["connector_load_bytes"]),
+            connector_load_time_s=float(
+                connector_stats_summary["connector_load_time_s"]
+            ),
+            connector_store_ops=int(connector_stats_summary["connector_store_ops"]),
+            connector_store_bytes=int(connector_stats_summary["connector_store_bytes"]),
+            connector_store_time_s=float(
+                connector_stats_summary["connector_store_time_s"]
+            ),
             finished_sending=req_key in finished_sending_all,
             finished_recving=req_key in finished_recving_all,
             successful=True,
