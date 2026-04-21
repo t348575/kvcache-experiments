@@ -18,7 +18,17 @@ cd "$ROOT_DIR"
 
 mkdir -p slurm-logs
 
-source load.sh
+if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+  echo "Detected Slurm job: ${SLURM_JOB_ID}"
+else
+  echo "Running outside Slurm"
+fi
+
+if [[ -f "load.sh" ]]; then
+  source load.sh
+else
+  echo "load.sh not found, skipping environment setup"
+fi
 
 CONFIG_FILES=(
   "bench_configs/llmd.json"
