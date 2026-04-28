@@ -327,7 +327,10 @@ def build_vllm_command(vllm_args: dict) -> list[str]:
     for flag, value in vllm_args.items():
         cmd.append(flag)
         if value is not None:
-            cmd.append(str(value))
+            if isinstance(value, (dict, list)):
+                cmd.append(json.dumps(value, separators=(",", ":")))
+            else:
+                cmd.append(str(value))
     print(f"running {cmd}")
     return cmd
 
@@ -371,9 +374,12 @@ def stop_server(proc: subprocess.Popen) -> None:
 
 def wipe_shared_storage(config_name: str) -> None:
     cfg = SERVER_CONFIGS[config_name]
-    kv_transfer_str = cfg.get("--kv-transfer-config", "{}")
+    kv_transfer_cfg = cfg.get("--kv-transfer-config", {})
     try:
-        cfg_dict = json.loads(kv_transfer_str)
+        if isinstance(kv_transfer_cfg, str):
+            cfg_dict = json.loads(kv_transfer_cfg)
+        else:
+            cfg_dict = kv_transfer_cfg
         shared_path = cfg_dict.get("kv_connector_extra_config", {}).get("shared_storage_path")
     except (json.JSONDecodeError, TypeError, KeyError):
         shared_path = None
@@ -523,9 +529,9 @@ def parse_args():
     parser.add_argument(
         "--server-configs",
         nargs="+",
-        default=["baseline", "native_offload"],
+        default=["baseline", "native_offload", "storage_offload"],
         choices=["baseline", "native_offload", "storage_offload"],
-        help="Which server configs to run (default: both baseline and native_offload)",
+        help="Which server configs to run (default: baseline, native_offload, and storage_offload)",
     )
     parser.add_argument(
         "--shared-storage-path",

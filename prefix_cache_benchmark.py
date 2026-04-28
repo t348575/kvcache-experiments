@@ -16,6 +16,7 @@ from prefix_cache_common import (
     parse_int_range,
     parse_pct_range,
     run_benchmark,
+    send_request,
 )
 
 
@@ -131,6 +132,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-len", type=int, default=1, help="Max tokens to generate per request."
     )
     p.add_argument(
+        "--pre-warmup-requests",
+        type=int,
+        default=5,
+        help="Number of untimed requests to send before the measured benchmark. "
+        "Use 0 to disable.",
+    )
+    p.add_argument(
+        "--pre-warmup-doc-size",
+        type=int,
+        default=256,
+        help="Document size in tokens for each untimed pre-warmup request.",
+    )
+    p.add_argument(
         "--max-concurrency",
         type=int,
         default=8,
@@ -168,6 +182,34 @@ def get_base_url(args) -> str:
     return f"http://{host}:{port}/v1"
 
 
+async def run_pre_warmup_requests(
+    client: AsyncOpenAI,
+    model: str,
+    count: int,
+    doc_tokens: int,
+    output_len: int,
+    completions_mode: bool,
+    eos_token_id: int | None,
+) -> None:
+    for request_id in range(count):
+        spec = RequestSpec(
+            request_id=-(request_id + 1),
+            doc_tokens=doc_tokens,
+            scheduled_time=0.0,
+        )
+        prompt = f"pre-warmup-{request_id} " + " ".join(["hi"] * doc_tokens)
+        await send_request(
+            client=client,
+            model=model,
+            prompt=prompt,
+            spec=spec,
+            output_len=output_len,
+            completions_mode=completions_mode,
+            eos_token_id=eos_token_id,
+            benchmark_start=0.0,
+        )
+
+
 async def main():
     parser = build_parser()
     args = parser.parse_args()
@@ -190,6 +232,26 @@ async def main():
         models = await client.models.list()
         model = models.data[0].id
         print(f"Auto-selected model: {model}")
+
+    if args.pre_warmup_requests < 0:
+        parser.error("--pre-warmup-requests must be >= 0")
+    if args.pre_warmup_doc_size < 1:
+        parser.error("--pre-warmup-doc-size must be >= 1")
+
+    if args.pre_warmup_requests:
+        print(
+            f"Sending {args.pre_warmup_requests} untimed pre-warmup request(s) "
+            f"({args.pre_warmup_doc_size} tokens each)"
+        )
+        await run_pre_warmup_requests(
+            client=client,
+            model=model,
+            count=args.pre_warmup_requests,
+            doc_tokens=args.pre_warmup_doc_size,
+            output_len=args.output_len,
+            completions_mode=args.completions,
+            eos_token_id=args.eos_token_id,
+        )
 
     # Build schedule
     specs = generate_request_schedule(

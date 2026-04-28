@@ -49,8 +49,7 @@
             "xnvme_mem": "posix",
             "sync_on_store": true
           }
-        },
-        "--distributed_executor_backend": "mp"
+        }
       },
       "long_doc_qa_args": {}
     }

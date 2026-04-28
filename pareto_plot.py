@@ -28,6 +28,7 @@ import json
 import os
 import re
 import statistics
+import sys
 from typing import Optional
 
 import matplotlib.pyplot as plt
@@ -72,6 +73,65 @@ def load_results(csv_path: str) -> list[dict]:
     return [r for r in rows if not r.get("error")]
 
 
+def available_cache_server_configs(rows: list[dict]) -> list[str]:
+    return sorted({
+        r["server_config"]
+        for r in rows
+        if r.get("curve") == "cache_hit" and r.get("server_config")
+    })
+
+
+def select_cache_server_config(rows: list[dict], requested: str | None) -> str | None:
+    configs = available_cache_server_configs(rows)
+    if requested:
+        if requested not in configs:
+            available = ", ".join(configs) if configs else "none"
+            raise ValueError(
+                f"cache server config {requested!r} not found in results; available: {available}"
+            )
+        return requested
+
+    if len(configs) <= 1:
+        return configs[0] if configs else None
+
+    print("\nAvailable cache_hit server configs:")
+    for i, config in enumerate(configs, start=1):
+        n_rows = sum(1 for r in rows if r.get("curve") == "cache_hit" and r.get("server_config") == config)
+        print(f"  {i}) {config} ({n_rows} rows)")
+
+    while True:
+        raw = input(f"Select cache_hit server config [1-{len(configs)}]: ").strip()
+        if raw.isdigit() and 1 <= int(raw) <= len(configs):
+            return configs[int(raw) - 1]
+        print(f"  Enter a number between 1 and {len(configs)}.")
+
+
+def filter_cache_server_config(rows: list[dict], server_config: str | None) -> list[dict]:
+    if server_config is None:
+        return rows
+    return [
+        r for r in rows
+        if r.get("curve") != "cache_hit" or r.get("server_config") == server_config
+    ]
+
+
+def cache_hit_job_numbers(csv_path: str, server_config: str | None) -> set[int] | None:
+    if server_config is None:
+        return None
+
+    job_nums: set[int] = set()
+    with open(csv_path, newline="") as f:
+        reader = csv.DictReader(f)
+        for job_idx, row in enumerate(reader, start=1):
+            if row.get("error"):
+                continue
+            if row.get("curve") != "cache_hit":
+                continue
+            if row.get("server_config") == server_config:
+                job_nums.add(job_idx)
+    return job_nums
+
+
 def serial_curve(rows: list[dict], curve: str) -> dict[int, dict]:
     """Return {doc_size: row} for serial (concurrency=1) rows of the given curve."""
     return {
@@ -107,6 +167,7 @@ def _find_result_dir(csv_path: str) -> str:
 
 def load_per_run_curves(
     csv_path: str,
+    cache_server_config: str | None = None,
 ) -> tuple[dict[int, dict] | None, dict[int, dict] | None]:
     """
     Load f(D) and g(P) from per-run CSVs in the result directory.
@@ -126,6 +187,13 @@ def load_per_run_curves(
     cache_csvs = sorted(
         globmod.glob(os.path.join(result_dir, "job_*_cache_hit_*_c1.csv"))
     )
+    selected_cache_jobs = cache_hit_job_numbers(csv_path, cache_server_config)
+    if selected_cache_jobs is not None:
+        cache_csvs = [
+            fp for fp in cache_csvs
+            if (m := re.match(r"job_(\d+)_", os.path.basename(fp)))
+            and int(m.group(1)) in selected_cache_jobs
+        ]
 
     if not cold_csvs and not cache_csvs:
         return None, None
@@ -217,6 +285,60 @@ def speedup_grid(
         return np.where(cached > 0, cold / cached, np.inf)
 
 
+def break_even_curve_values(
+    f_interp: PchipInterpolator,
+    g_interp: PchipInterpolator,
+    doc_sizes: list[int],
+    samples: int = 1001,
+) -> list[dict[str, float | int | None]]:
+    """Return the smallest prefix length where cache-hit TTFT breaks even."""
+    values: list[dict[str, float | int | None]] = []
+    for doc_size in doc_sizes:
+        prefix_tokens = np.linspace(0.0, float(doc_size), samples)
+        delta = f_interp(prefix_tokens) - g_interp(prefix_tokens)
+
+        if delta[0] >= 0:
+            break_even_tokens = 0.0
+        else:
+            crossings = np.where(delta >= 0)[0]
+            if len(crossings) == 0:
+                values.append({
+                    "doc_size": doc_size,
+                    "prefix_tokens": None,
+                    "prefix_frac": None,
+                })
+                continue
+
+            hi = int(crossings[0])
+            lo = max(0, hi - 1)
+            x0, x1 = prefix_tokens[lo], prefix_tokens[hi]
+            y0, y1 = delta[lo], delta[hi]
+            if y1 == y0:
+                break_even_tokens = x1
+            else:
+                break_even_tokens = x0 + (0.0 - y0) * (x1 - x0) / (y1 - y0)
+
+        values.append({
+            "doc_size": doc_size,
+            "prefix_tokens": break_even_tokens,
+            "prefix_frac": break_even_tokens / doc_size if doc_size else None,
+        })
+    return values
+
+
+def print_break_even_curve(values: list[dict[str, float | int | None]]) -> None:
+    print("\nBreak-even curve values:")
+    print("  doc_tokens,prefix_tokens,prefix_fraction_pct")
+    for row in values:
+        doc_size = int(row["doc_size"])
+        prefix_tokens = row["prefix_tokens"]
+        prefix_frac = row["prefix_frac"]
+        if prefix_tokens is None or prefix_frac is None:
+            print(f"  {doc_size},none,none")
+        else:
+            print(f"  {doc_size},{prefix_tokens:.1f},{prefix_frac * 100:.2f}")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # FIGURE 1: TTFT CURVES
 # ─────────────────────────────────────────────────────────────────────────────
@@ -273,6 +395,9 @@ def plot_pareto_frontier(
     g_floor = min(hit[d]["ttft_mean_s"] for d in hit)
     f_interp = build_interpolator(cold)
     g_interp = build_interpolator(hit, floor=g_floor)
+    print_break_even_curve(
+        break_even_curve_values(f_interp, g_interp, doc_sizes_measured)
+    )
 
     cold_ttft_arr = np.array([cold[d]["ttft_mean_s"] for d in doc_sizes_measured])
 
@@ -435,20 +560,28 @@ def plot_concurrency(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def load_cuda_transfer_curve(csv_path: str) -> dict[int, float]:
+def load_cuda_transfer_curve(
+    csv_path: str,
+    cache_server_config: str | None = None,
+) -> dict[int, float]:
     """
     Read cache_hit profile JSONs to extract median cuda_transfer(cpu_to_gpu)
     duration per doc_size.  Returns {doc_tokens: cuda_transfer_ms}.
     """
     result_dir = _find_result_dir(csv_path)
+    selected_cache_jobs = cache_hit_job_numbers(csv_path, cache_server_config)
     mapping: dict[int, int] = {}
     for fp in globmod.glob(os.path.join(result_dir, "job_*_cache_hit_*_c1.csv")):
         m = re.match(
             r"job_(\d+)_(?:cold_prefill|cache_hit)_(\d+)_c\d+\.csv",
             os.path.basename(fp),
         )
-        if m:
-            mapping[int(m.group(1))] = int(m.group(2))
+        if not m:
+            continue
+        job_num = int(m.group(1))
+        if selected_cache_jobs is not None and job_num not in selected_cache_jobs:
+            continue
+        mapping[job_num] = int(m.group(2))
 
     to_gpu_event_markers = (
         "cuda_transfer(cpu_to_gpu",
@@ -599,6 +732,11 @@ def main():
     p.add_argument("--results", required=True, help="pareto_measure CSV file.")
     p.add_argument("--output-dir", default=".", help="Directory to write plots into.")
     p.add_argument("--model", required=True, help="Model name")
+    p.add_argument(
+        "--cache-server-config",
+        default=None,
+        help="cache_hit server_config to plot. If omitted and multiple are available, prompt interactively.",
+    )
     # Optional: model architecture for IO budget plot
     p.add_argument("--layers", type=int, default=None, help="Number of KV layers.")
     p.add_argument("--kv-heads", type=int, default=None, help="Number of KV heads.")
@@ -612,8 +750,17 @@ def main():
     rows = load_results(args.results)
     print(f"  {len(rows)} summary rows loaded.")
 
+    try:
+        cache_server_config = select_cache_server_config(rows, args.cache_server_config)
+    except ValueError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+    if cache_server_config:
+        rows = filter_cache_server_config(rows, cache_server_config)
+        print(f"  Using cache_hit server_config: {cache_server_config}")
+
     # Prefer per-run CSVs (proper is_prefix_reuse filtering)
-    cold_pr, hit_pr = load_per_run_curves(args.results)
+    cold_pr, hit_pr = load_per_run_curves(args.results, cache_server_config)
     if cold_pr and hit_pr:
         cold = cold_pr
         hit = hit_pr
@@ -657,7 +804,7 @@ def main():
         dtype_bytes = {"fp16": 2, "bf16": 2, "fp8": 1}[args.dtype]
         kv_bpt = 2 * args.layers * args.kv_heads * args.head_dim * dtype_bytes
         print(f"\n  KV bytes/token: {kv_bpt:,}  — generating IO budget plot…")
-        cuda_transfer = load_cuda_transfer_curve(args.results)
+        cuda_transfer = load_cuda_transfer_curve(args.results, cache_server_config)
         if cuda_transfer:
             plot_io_budget(
                 cold,
