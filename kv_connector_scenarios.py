@@ -15,6 +15,7 @@ from kv_connector_harness import (
     parse_float_range,
     parse_int_range,
     parse_json_dict,
+    resolve_local_hf_config_path,
     results_to_rows,
 )
 
@@ -64,6 +65,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--model-name", type=str, default="meta-llama/Llama-3.2-3B-Instruct"
+    )
+    parser.add_argument(
+        "--hf-config-path",
+        type=str,
+        default=None,
+        help=(
+            "Local directory or config.json to use for model metadata. "
+            "When omitted, remote model IDs are resolved once outside vLLM and "
+            "vLLM is forced into HF offline mode."
+        ),
     )
     parser.add_argument("--block-size", type=int, default=16)
     parser.add_argument("--num-blocks", type=int, default=4096)
@@ -222,10 +233,17 @@ def main() -> None:
         connector_module_path=args.connector_module_path,
         connector_extra_config=connector_extra_config,
         model_name=args.model_name,
+        hf_config_path=args.hf_config_path,
         block_size=args.block_size,
         num_blocks=args.num_blocks,
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_num_seqs=args.max_num_seqs,
+    )
+    config = RuntimeConnectorConfig(
+        **{
+            **config.__dict__,
+            "hf_config_path": resolve_local_hf_config_path(config),
+        }
     )
 
     worker_chunks = split_specs_for_workers(specs, args.per_instance_workers)

@@ -5,7 +5,12 @@ import json
 import os
 import random
 import time
+import fcntl
+import hashlib
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 MODEL_DTYPE = "float16"
@@ -24,6 +29,7 @@ class RuntimeConnectorConfig:
     connector_module_path: str | None = None
     connector_extra_config: dict[str, Any] | None = None
     model_name: str = "meta-llama/Llama-3.2-3B-Instruct"
+    hf_config_path: str | None = None
     block_size: int = 16
     num_blocks: int = 4096
     max_num_batched_tokens: int = MAX_NUM_BATCHED_TOKENS
@@ -82,6 +88,104 @@ class RuntimePlacement:
     allocated_on_cpu: bool
 
 
+@contextmanager
+def _temporary_env(updates: dict[str, str]):
+    previous = {key: os.environ.get(key) for key in updates}
+    try:
+        os.environ.update(updates)
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _normalize_hf_config_path(path: str) -> str:
+    candidate = Path(path).expanduser().resolve()
+    if not candidate.exists():
+        raise FileNotFoundError(f"HF config path does not exist: {candidate}")
+    if candidate.is_file():
+        if candidate.name != "config.json":
+            raise ValueError(
+                "HF config path must be a directory or a config.json file: "
+                f"{candidate}"
+            )
+        return str(candidate.parent)
+    config_file = candidate / "config.json"
+    if not config_file.exists():
+        raise FileNotFoundError(f"No config.json found under HF config path: {candidate}")
+    return str(candidate)
+
+
+def _download_hf_config_once(model_name: str) -> str:
+    try:
+        from huggingface_hub import snapshot_download
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Resolving a remote model config requires huggingface_hub in the active environment"
+        ) from exc
+
+    lock_dir = Path.home() / ".cache" / "kvcache-experiments" / "hf-config-locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_name = hashlib.sha256(model_name.encode("utf-8")).hexdigest() + ".lock"
+    lock_path = lock_dir / lock_name
+
+    with open(lock_path, "a+") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            snapshot_path = snapshot_download(
+                repo_id=model_name,
+                allow_patterns=["config.json"],
+                local_files_only=True,
+            )
+        except Exception:
+            snapshot_path = snapshot_download(
+                repo_id=model_name,
+                allow_patterns=["config.json"],
+            )
+    return _normalize_hf_config_path(snapshot_path)
+
+
+@lru_cache(maxsize=None)
+def _resolve_local_hf_config_path_cached(
+    model_name: str, hf_config_path: str | None
+) -> str:
+    if hf_config_path:
+        return _normalize_hf_config_path(hf_config_path)
+
+    model_path = Path(model_name).expanduser()
+    if model_path.exists():
+        return _normalize_hf_config_path(str(model_path))
+
+    return _download_hf_config_once(model_name)
+
+
+def resolve_local_hf_config_path(config: RuntimeConnectorConfig) -> str:
+    return _resolve_local_hf_config_path_cached(config.model_name, config.hf_config_path)
+
+
+def build_model_config_kwargs(config: RuntimeConnectorConfig) -> dict[str, Any]:
+    local_hf_config_path = resolve_local_hf_config_path(config)
+    return {
+        "model": local_hf_config_path,
+        "hf_config_path": local_hf_config_path,
+        "trust_remote_code": True,
+        "dtype": MODEL_DTYPE,
+        "seed": 42,
+        "hf_overrides": {},
+        "config_format": "hf",
+    }
+
+
+def make_model_config(config: RuntimeConnectorConfig) -> Any:
+    from vllm.config import ModelConfig
+
+    with _temporary_env({"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}):
+        return ModelConfig(**build_model_config_kwargs(config))
+
+
 def _resolve_runtime_placement(extra_config: dict[str, Any] | None) -> RuntimePlacement:
     connector_extra_config = extra_config or {}
     skip_gpu_copy = bool(connector_extra_config.get("skip_gpu_copy", False))
@@ -104,6 +208,61 @@ def _resolve_runtime_placement(extra_config: dict[str, Any] | None) -> RuntimePl
         allocated_on_cpu=allocated_on_cpu,
     )
 
+def _should_use_metadata_only_dummy_kv(extra_config: dict[str, Any] | None) -> bool:
+    connector_extra_config = extra_config or {}
+    return bool(connector_extra_config.get("skip_gpu_copy", False)) and str(
+        connector_extra_config.get("file_io_mode", "full")
+    ).strip().lower() == "metadata_only"
+
+
+def _allocate_minimal_uniform_kv_caches(
+    *,
+    torch: Any,
+    kv_cache_spec: Any,
+    cache_dtype: str,
+    device: Any,
+    kernel_block_size: int,
+    layer_names: list[str],
+    attn_backend: Any,
+) -> tuple[dict[str, Any], Any, Any]:
+    num_layers = len(layer_names)
+    num_blocks = 1
+    num_blocks_per_kv_block = kv_cache_spec.block_size // kernel_block_size
+    kernel_num_blocks = num_blocks * num_blocks_per_kv_block
+    kv_cache_shape = attn_backend.get_kv_cache_shape(
+        kernel_num_blocks,
+        kernel_block_size,
+        kv_cache_spec.num_kv_heads,
+        kv_cache_spec.head_size,
+        cache_dtype_str=cache_dtype,
+    )
+    kv_cache_shape = (num_layers,) + kv_cache_shape
+
+    try:
+        kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
+            include_num_layers_dimension=True
+        )
+        assert len(kv_cache_stride_order) == len(kv_cache_shape)
+    except (AttributeError, NotImplementedError):
+        kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
+
+    kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
+    total_size = kv_cache_spec.page_size_bytes * num_layers
+    cross_layers_kv_cache = (
+        torch.zeros(total_size, dtype=torch.int8, device=device)
+        .view(kv_cache_spec.dtype)
+        .view(kv_cache_shape)
+    )
+    inv_order = [
+        kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
+    ]
+    permuted_kv_cache = cross_layers_kv_cache.permute(*inv_order)
+    kv_caches = {
+        layer_name: permuted_kv_cache[layer_idx]
+        for layer_idx, layer_name in enumerate(layer_names)
+    }
+    return kv_caches, cross_layers_kv_cache, attn_backend
+
 
 def estimate_kv_cache_bytes(config: RuntimeConnectorConfig) -> int:
     placement = _resolve_runtime_placement(config.connector_extra_config)
@@ -114,7 +273,6 @@ def estimate_kv_cache_bytes(config: RuntimeConnectorConfig) -> int:
             CacheConfig,
             DeviceConfig,
             KVTransferConfig,
-            ModelConfig,
             SchedulerConfig,
             VllmConfig,
         )
@@ -128,13 +286,7 @@ def estimate_kv_cache_bytes(config: RuntimeConnectorConfig) -> int:
     if dtype is None:
         raise ValueError(f"unsupported torch dtype: {MODEL_DTYPE}")
 
-    model_config = ModelConfig(
-        model=config.model_name,
-        trust_remote_code=True,
-        dtype=MODEL_DTYPE,
-        seed=42,
-        hf_overrides={},
-    )
+    model_config = make_model_config(config)
     scheduler_config = SchedulerConfig(
         max_num_seqs=config.max_num_seqs,
         max_num_batched_tokens=config.max_num_batched_tokens,
@@ -337,7 +489,6 @@ class RuntimeKVConnectorHarness:
                 CacheConfig,
                 DeviceConfig,
                 KVTransferConfig,
-                ModelConfig,
                 SchedulerConfig,
                 VllmConfig,
                 set_current_vllm_config,
@@ -388,13 +539,7 @@ class RuntimeKVConnectorHarness:
         connector_extra_config["runtime_kv_device"] = self._placement.runtime_kv_device
         connector_extra_config["runtime_kv_medium"] = self._placement.runtime_kv_medium
 
-        model_config = ModelConfig(
-            model=self.config.model_name,
-            trust_remote_code=True,
-            dtype=MODEL_DTYPE,
-            seed=42,
-            hf_overrides={},
-        )
+        model_config = make_model_config(self.config)
         scheduler_config = SchedulerConfig(
             max_num_seqs=self.config.max_num_seqs,
             max_num_batched_tokens=self.config.max_num_batched_tokens,
@@ -482,45 +627,67 @@ class RuntimeKVConnectorHarness:
 
         if cache_mode == "cross_layer":
             with set_current_vllm_config(vllm_config):
-                _, cross_layers_kv_cache, _ = (
-                    KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
-                        kv_cache_config=kv_cache_config,
-                        attn_groups=[
-                            [
-                                AttentionGroup(
-                                    backend=backend_cls,
-                                    layer_names=layer_names,
-                                    kv_cache_spec=kv_cache_spec,
-                                    kv_cache_group_id=0,
-                                )
-                            ]
-                        ],
+                if _should_use_metadata_only_dummy_kv(self.config.connector_extra_config):
+                    _, cross_layers_kv_cache, _ = _allocate_minimal_uniform_kv_caches(
+                        torch=torch,
+                        kv_cache_spec=kv_cache_spec,
                         cache_dtype=CACHE_DTYPE,
                         device=device,
-                        kernel_block_sizes=[self.config.block_size],
+                        kernel_block_size=self.config.block_size,
+                        layer_names=layer_names,
+                        attn_backend=backend_cls,
                     )
-                )
+                else:
+                    _, cross_layers_kv_cache, _ = (
+                        KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
+                            kv_cache_config=kv_cache_config,
+                            attn_groups=[
+                                [
+                                    AttentionGroup(
+                                        backend=backend_cls,
+                                        layer_names=layer_names,
+                                        kv_cache_spec=kv_cache_spec,
+                                        kv_cache_group_id=0,
+                                    )
+                                ]
+                            ],
+                            cache_dtype=CACHE_DTYPE,
+                            device=device,
+                            kernel_block_sizes=[self.config.block_size],
+                        )
+                    )
                 worker_connector.register_cross_layers_kv_cache(
                     kv_cache=cross_layers_kv_cache,
                     attn_backend=backend_cls,
                 )
         elif cache_mode == "layer_dict":
-            kv_caches, _, _ = KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
-                kv_cache_config=kv_cache_config,
-                attn_groups=[
-                    [
-                        AttentionGroup(
-                            backend=backend_cls,
-                            layer_names=layer_names,
-                            kv_cache_spec=kv_cache_spec,
-                            kv_cache_group_id=0,
-                        )
-                    ]
-                ],
-                cache_dtype=CACHE_DTYPE,
-                device=device,
-                kernel_block_sizes=[self.config.block_size],
-            )
+            if _should_use_metadata_only_dummy_kv(self.config.connector_extra_config):
+                kv_caches, _, _ = _allocate_minimal_uniform_kv_caches(
+                    torch=torch,
+                    kv_cache_spec=kv_cache_spec,
+                    cache_dtype=CACHE_DTYPE,
+                    device=device,
+                    kernel_block_size=self.config.block_size,
+                    layer_names=layer_names,
+                    attn_backend=backend_cls,
+                )
+            else:
+                kv_caches, _, _ = KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
+                    kv_cache_config=kv_cache_config,
+                    attn_groups=[
+                        [
+                            AttentionGroup(
+                                backend=backend_cls,
+                                layer_names=layer_names,
+                                kv_cache_spec=kv_cache_spec,
+                                kv_cache_group_id=0,
+                            )
+                        ]
+                    ],
+                    cache_dtype=CACHE_DTYPE,
+                    device=device,
+                    kernel_block_sizes=[self.config.block_size],
+                )
             worker_connector.register_kv_caches(kv_caches)
         else:
             raise ValueError(

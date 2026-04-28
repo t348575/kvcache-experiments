@@ -28,6 +28,7 @@ from kv_connector_harness import (
     get_free_cuda_bytes,
     parse_float_range,
     parse_int_range,
+    resolve_local_hf_config_path,
     results_to_rows,
 )
 
@@ -270,6 +271,14 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--model-name", default="meta-llama/Llama-3.2-3B-Instruct")
+    parser.add_argument(
+        "--hf-config-path",
+        default=None,
+        help=(
+            "Local directory or config.json used for model metadata resolution. "
+            "If omitted, remote model IDs are resolved once outside vLLM."
+        ),
+    )
     parser.add_argument("--block-size", type=int, default=16)
     parser.add_argument("--num-blocks", type=int, default=4096)
     parser.add_argument("--max-num-batched-tokens", type=int, default=131072)
@@ -473,6 +482,7 @@ def make_runtime_config(args: argparse.Namespace, extra_config: dict[str, Any]) 
         connector_module_path=args.connector_module_path,
         connector_extra_config=extra_config,
         model_name=args.model_name,
+        hf_config_path=args.hf_config_path,
         block_size=args.block_size,
         num_blocks=args.num_blocks,
         max_num_batched_tokens=args.max_num_batched_tokens,
@@ -550,6 +560,8 @@ def make_scenario_command(
         str(csv_output),
         "--json-output",
     ]
+    if args.hf_config_path:
+        cmd.extend(["--hf-config-path", args.hf_config_path])
     if args.connector_module_path:
         cmd.extend(["--connector-module-path", args.connector_module_path])
     return cmd
@@ -1179,6 +1191,14 @@ def main() -> None:
 
     shared_storage_path = Path(args.shared_storage_path)
     base_extra_config = parse_extra_config(args.connector_extra_config)
+    args.hf_config_path = resolve_local_hf_config_path(
+        RuntimeConnectorConfig(
+            connector_name=args.connector,
+            model_name=args.model_name,
+            hf_config_path=args.hf_config_path,
+        )
+    )
+    print(f"Using local HF config path: {args.hf_config_path}")
     jobs = build_jobs(args)
 
     summaries: list[dict[str, Any]] = []
