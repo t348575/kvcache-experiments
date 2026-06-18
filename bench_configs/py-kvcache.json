@@ -4,7 +4,7 @@
   "gpu_mem_util": 0.9,
   "vllm_port": 8000,
   "n_repetitions": 1,
-  "server_startup_timeout": 200,
+  "server_startup_timeout": 600,
   "output_prefix": "bench_py_kvcache",
   "flush_mode": false,
   "flush": {
@@ -12,14 +12,27 @@
     "document_length": 90000,
     "max_inflight_requests": 1
   },
-  "long_doc_qa_script": "lmcache_long_doc_qa.py",
-  "long_doc_qa_defaults": {
-    "--num-documents": "5",
-    "--document-length": ["1024", "10240", "40960", "81920"],
-    "--output-len": "1",
-    "--repeat-count": "5",
-    "--repeat-mode": "random",
-    "--max-inflight-requests": "4"
+  "prefix_cache_script": "prefix_cache_benchmark.py",
+  "prefix_cache_defaults": {
+    "--num-requests": "48",
+    "--doc-size": [
+      "1024",
+      "10240",
+      "40960",
+      "81920"
+    ],
+    "--output-len": [
+      "1",
+      "256",
+      "512",
+      "1024"
+    ],
+    "--prefix-reuse-pct": [
+      "0.5",
+      "1.0"
+    ],
+    "--prefix-size": "1.0",
+    "--max-concurrency": "8"
   },
   "sharegpt_dataset_path": "dataset/ShareGPT_V3_unfiltered_cleaned_split.json",
   "sharegpt_defaults": {
@@ -31,27 +44,118 @@
   },
   "configs": [
     {
-      "name": "py_kvcache",
-      "description": "XNvmeOffloadingSpec via scratch-node path",
-      "profile_json": "results_engine_core_0.json",
+      "name": "py_kvcache_no_preload",
+      "description": "py_kvcache (SharedStorageOffloadingSpec), preload disabled",
+      "profile_json": "merge.json",
       "vllm_args": {
         "--no-enable-prefix-caching": null,
         "--kv-transfer-config": {
           "kv_connector": "OffloadingConnector",
           "kv_role": "kv_both",
           "kv_connector_extra_config": {
-            "spec_name": "XNvmeOffloadingSpec",
-            "spec_module_path": "storage_kvcache.vllm_xnvme",
+            "spec_name": "SharedStorageOffloadingSpec",
+            "spec_module_path": "py_kvcache.vllm",
             "shared_storage_path": "/scratch-node/jkanichai-placeholder/py-kvcache-cache",
-            "block_size": 256,
-            "direct_io": true,
-            "xnvme_async": "io_uring",
-            "xnvme_mem": "posix",
-            "sync_on_store": true
+            "sync_on_store": false,
+            "enable_preload": false
           }
         }
       },
-      "long_doc_qa_args": {}
+      "prefix_cache_args": {
+        "--max-concurrency": [
+          "1",
+          "2",
+          "4",
+          "8",
+          "16"
+        ]
+      }
+    },
+    {
+      "name": "py_kvcache_preload",
+      "description": "py_kvcache (SharedStorageOffloadingSpec), preload enabled (lookahead=16)",
+      "profile_json": "merge.json",
+      "vllm_args": {
+        "--no-enable-prefix-caching": null,
+        "--kv-transfer-config": {
+          "kv_connector": "OffloadingConnector",
+          "kv_role": "kv_both",
+          "kv_connector_extra_config": {
+            "spec_name": "SharedStorageOffloadingSpec",
+            "spec_module_path": "py_kvcache.vllm",
+            "shared_storage_path": "/scratch-node/jkanichai-placeholder/py-kvcache-cache",
+            "sync_on_store": false,
+            "enable_preload": true,
+            "preload_lookahead_requests": 16,
+            "preload_share_staging": true
+          }
+        }
+      },
+      "prefix_cache_args": {
+        "--max-concurrency": [
+          "1",
+          "2",
+          "4",
+          "8",
+          "16"
+        ]
+      }
+    },
+    {
+      "name": "py_kvcache_no_preload_pc",
+      "description": "py_kvcache (SharedStorageOffloadingSpec), preload disabled (GPU prefix caching enabled)",
+      "profile_json": "merge.json",
+      "vllm_args": {
+        "--kv-transfer-config": {
+          "kv_connector": "OffloadingConnector",
+          "kv_role": "kv_both",
+          "kv_connector_extra_config": {
+            "spec_name": "SharedStorageOffloadingSpec",
+            "spec_module_path": "py_kvcache.vllm",
+            "shared_storage_path": "/scratch-node/jkanichai-placeholder/py-kvcache-cache",
+            "sync_on_store": false,
+            "enable_preload": false
+          }
+        }
+      },
+      "prefix_cache_args": {
+        "--max-concurrency": [
+          "1",
+          "2",
+          "4",
+          "8",
+          "16"
+        ]
+      }
+    },
+    {
+      "name": "py_kvcache_preload_pc",
+      "description": "py_kvcache (SharedStorageOffloadingSpec), preload enabled (lookahead=16) (GPU prefix caching enabled)",
+      "profile_json": "merge.json",
+      "vllm_args": {
+        "--kv-transfer-config": {
+          "kv_connector": "OffloadingConnector",
+          "kv_role": "kv_both",
+          "kv_connector_extra_config": {
+            "spec_name": "SharedStorageOffloadingSpec",
+            "spec_module_path": "py_kvcache.vllm",
+            "shared_storage_path": "/scratch-node/jkanichai-placeholder/py-kvcache-cache",
+            "sync_on_store": false,
+            "enable_preload": true,
+            "preload_lookahead_requests": 16,
+            "preload_share_staging": true
+          }
+        }
+      },
+      "prefix_cache_args": {
+        "--max-concurrency": [
+          "1",
+          "2",
+          "4",
+          "8",
+          "16"
+        ]
+      }
     }
   ]
 }

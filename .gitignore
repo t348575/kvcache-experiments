@@ -1,2 +1,12 @@
 __pycache__
 .venv
+
+data/**/*.json
+data/**/*.log
+dataset
+results
+node10 plots
+surf plots
+llama-3b-pyoffload-arc
+llama-3b-pyoffload-final
+qwen-4b-pyoffload

@@ -1,0 +1,113 @@
+{
+  "model": "Qwen/Qwen3-4B-Instruct-2507",
+  "max_model_len": 90000,
+  "gpu_mem_util": 0.9,
+  "vllm_port": 8000,
+  "n_repetitions": 1,
+  "server_startup_timeout": 600,
+  "output_prefix": "bailian_bench",
+
+  "prefix_cache_script": "prefix_cache_benchmark.py",
+  "sharegpt_dataset_path": "dataset/ShareGPT_V3_unfiltered_cleaned_split.json",
+
+  "bailian_script": "scripts/bailian_replay.py",
+  "bailian_trace_path": "dataset/bailian",
+  "bailian_defaults": {
+    "--task": "coder",
+    "--max-requests": "512",
+    "--max-concurrency": "16",
+    "--output-len": "1",
+    "--use-dataset-output-len": null,
+    "--suppress-eos": null,
+    "--closed-loop": null
+  },
+
+  "configs": [
+    {
+      "name": "baseline_recompute",
+      "description": "No GPU prefix cache, no offload — every reuse recomputes",
+      "vllm_args": {
+        "--num-gpu-blocks-override": 8000
+      },
+      "bailian_args": {
+        "--task": ["coder"]
+      }
+    },
+    {
+      "name": "native_offload_disk",
+      "description": "vLLM built-in native offloading (with diskonly)",
+      "vllm_args": {
+        "--num-gpu-blocks-override": 8000,
+        "--kv-transfer-config": {
+          "kv_connector": "OffloadingConnector",
+          "kv_role": "kv_both",
+          "kv_connector_extra_config": {
+            "spec_name": "TieringOffloadingSpec",
+            "cpu_bytes_to_use": 68719476736,
+            "eviction_policy": "arc",
+            "block_size": 256,
+            "secondary_tiers": [
+              {
+                "type": "fs_python",
+                "root_dir": "/scratch-node/jkanichai-placeholder/native-tier-disk"
+              }
+            ]
+          }
+        }
+      },
+      "bailian_args": {
+        "--task": ["coder"]
+      }
+    },
+    {
+      "name": "pykvcache",
+      "description": "py_kvcache, ARC staging cache",
+      "vllm_args": {
+        "--kv-transfer-config": {
+          "--num-gpu-blocks-override": 8000,
+          "kv_connector": "OffloadingConnector",
+          "kv_role": "kv_both",
+          "kv_connector_extra_config": {
+            "spec_name": "SharedStorageOffloadingSpec",
+            "spec_module_path": "py_kvcache.vllm",
+            "shared_storage_path": "/scratch-node/jkanichai-placeholder/py-kvcache-cache",
+            "sync_on_store": false,
+            "enable_preload": true,
+            "staging_mem": 64,
+            "preload_lookahead_requests": 16,
+            "preload_share_staging": true,
+            "staging_cache": "arc",
+            "block_size": 256,
+            "prefix_cache_break_even_path": "pyoffload-qwen.json"
+          }
+        }
+      },
+      "bailian_args": {
+        "--task": ["coder"]
+      }
+    },
+    {
+      "name": "lmcache_cpu_disk",
+      "description": "LMCache (LMCacheConnectorV1), CPU and local disk backend",
+      "vllm_args": {
+        "--num-gpu-blocks-override": 8000,
+        "--kv-transfer-config": {
+          "kv_connector": "LMCacheConnectorV1",
+          "kv_role": "kv_both"
+        }
+      },
+      "env": {
+        "VLLM_RPC_BASE_PATH": "/tmp",
+        "LMCACHE_USE_EXPERIMENTAL": "True",
+        "LMCACHE_CHUNK_SIZE": "256",
+        "LMCACHE_LOCAL_CPU": "True",
+        "LMCACHE_MAX_LOCAL_CPU_SIZE": "64.0",
+        "LMCACHE_LOCAL_DISK": "file:///scratch-node/jkanichai-placeholder/lmcache-disk/",
+        "LMCACHE_MAX_LOCAL_DISK_SIZE": "4096.0"
+      },
+      "bailian_args": {
+        "--task": ["coder"]
+      }
+    }
+  ]
+}

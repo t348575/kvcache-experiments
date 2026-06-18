@@ -5,7 +5,7 @@
   "vllm_port": 8000,
   "n_repetitions": 1,
   "server_startup_timeout": 600,
-  "output_prefix": "bench_native_offload",
+  "output_prefix": "bench_py_kvcache",
   "flush_mode": false,
   "flush": {
     "num_documents": 2,
@@ -36,25 +36,8 @@
   },
   "configs": [
     {
-      "name": "native_offload",
-      "description": "vLLM native KV offloading",
-      "profile_json": "merge.json",
-      "vllm_args": {
-        "--no-enable-prefix-caching": null,
-        "--kv-offloading-backend": "native",
-        "--kv-offloading-size": "64",
-        "--disable-hybrid-kv-cache-manager": null
-      },
-      "prefix_cache_args": {
-        "--max-concurrency": [
-          "8",
-          "50"
-        ]
-      }
-    },
-    {
-      "name": "native_offload_disk_tier",
-      "description": "vLLM tiering offload: CPU primary + filesystem (fs_python) disk secondary tier",
+      "name": "py_kvcache_preload",
+      "description": "py_kvcache (SharedStorageOffloadingSpec), preload enabled (lookahead=16)",
       "profile_json": "merge.json",
       "vllm_args": {
         "--no-enable-prefix-caching": null,
@@ -62,24 +45,21 @@
           "kv_connector": "OffloadingConnector",
           "kv_role": "kv_both",
           "kv_connector_extra_config": {
-            "spec_name": "TieringOffloadingSpec",
-            "cpu_bytes_to_use": 68719476736,
-            "eviction_policy": "arc",
-            "block_size": 256,
-            "secondary_tiers": [
-              {
-                "type": "fs_python",
-                "root_dir": "/scratch-node/jkanichai-placeholder/native-tier-disk"
-              }
-            ]
+            "spec_name": "SharedStorageOffloadingSpec",
+            "spec_module_path": "py_kvcache.vllm",
+            "shared_storage_path": "/scratch-node/jkanichai-placeholder/py-kvcache-cache",
+            "sync_on_store": false,
+            "enable_preload": true,
+            "staging_mem": 64,
+            "preload_lookahead_requests": 16,
+            "preload_share_staging": true,
+            "staging_cache": "arc",
+            "block_size": 256
           }
         }
       },
       "prefix_cache_args": {
-        "--max-concurrency": [
-          "8",
-          "50"
-        ]
+        "--max-concurrency": ["8", "50"]
       }
     }
   ]

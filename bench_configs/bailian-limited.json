@@ -1,0 +1,61 @@
+{
+  "model": "Qwen/Qwen3-4B-Instruct-2507",
+  "max_model_len": 90000,
+  "gpu_mem_util": 0.9,
+  "vllm_port": 8000,
+  "n_repetitions": 1,
+  "server_startup_timeout": 600,
+  "output_prefix": "bailian_bench",
+
+  "prefix_cache_script": "prefix_cache_benchmark.py",
+  "sharegpt_dataset_path": "dataset/ShareGPT_V3_unfiltered_cleaned_split.json",
+
+  "bailian_script": "scripts/bailian_replay.py",
+  "bailian_trace_path": "dataset/bailian",
+  "bailian_defaults": {
+    "--task": "coder",
+    "--max-requests": "512",
+    "--max-concurrency": "16",
+    "--output-len": "1",
+    "--use-dataset-output-len": null,
+    "--suppress-eos": null,
+    "--closed-loop": null
+  },
+
+  "configs": [
+    {
+      "name": "baseline_recompute",
+      "description": "No GPU prefix cache, no offload — every reuse recomputes",
+      "vllm_args": {},
+      "bailian_args": {
+        "--task": ["coder", "A", "B"]
+      }
+    },
+    {
+      "name": "pykvcache",
+      "description": "py_kvcache, ARC staging cache",
+      "vllm_args": {
+        "--kv-transfer-config": {
+          "kv_connector": "OffloadingConnector",
+          "kv_role": "kv_both",
+          "kv_connector_extra_config": {
+            "spec_name": "SharedStorageOffloadingSpec",
+            "spec_module_path": "py_kvcache.vllm",
+            "shared_storage_path": "/scratch-node/jkanichai-placeholder/py-kvcache-cache",
+            "sync_on_store": false,
+            "enable_preload": true,
+            "staging_mem": 64,
+            "preload_lookahead_requests": 16,
+            "preload_share_staging": true,
+            "staging_cache": "arc",
+            "block_size": 256,
+            "prefix_cache_break_even_path": "pyoffload-qwen.json"
+          }
+        }
+      },
+      "bailian_args": {
+        "--task": ["coder", "A", "B"]
+      }
+    }
+  ]
+}

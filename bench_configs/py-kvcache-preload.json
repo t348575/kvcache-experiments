@@ -5,7 +5,7 @@
   "vllm_port": 8000,
   "n_repetitions": 1,
   "server_startup_timeout": 600,
-  "output_prefix": "bench_native_offload",
+  "output_prefix": "bench_py_kvcache",
   "flush_mode": false,
   "flush": {
     "num_documents": 2,
@@ -36,14 +36,27 @@
   },
   "configs": [
     {
-      "name": "native_offload",
-      "description": "vLLM native KV offloading",
+      "name": "py_kvcache_no_preload",
+      "description": "py_kvcache (SharedStorageOffloadingSpec), preload disabled",
       "profile_json": "merge.json",
       "vllm_args": {
         "--no-enable-prefix-caching": null,
-        "--kv-offloading-backend": "native",
-        "--kv-offloading-size": "64",
-        "--disable-hybrid-kv-cache-manager": null
+        "--kv-transfer-config": {
+          "kv_connector": "OffloadingConnector",
+          "kv_role": "kv_both",
+          "kv_connector_extra_config": {
+            "spec_name": "SharedStorageOffloadingSpec",
+            "spec_module_path": "py_kvcache.vllm",
+            "shared_storage_path": "/scratch-node/jkanichai-placeholder/py-kvcache-cache",
+            "sync_on_store": false,
+            "enable_preload": false,
+            "staging_mem": 256,
+            "preload_lookahead_requests": 0,
+            "preload_share_staging": false,
+            "block_size": 256,
+            "staging_cache": "off"
+          }
+        }
       },
       "prefix_cache_args": {
         "--max-concurrency": [
@@ -53,8 +66,8 @@
       }
     },
     {
-      "name": "native_offload_disk_tier",
-      "description": "vLLM tiering offload: CPU primary + filesystem (fs_python) disk secondary tier",
+      "name": "py_kvcache_preload",
+      "description": "py_kvcache (SharedStorageOffloadingSpec), preload enabled (lookahead=16)",
       "profile_json": "merge.json",
       "vllm_args": {
         "--no-enable-prefix-caching": null,
@@ -62,16 +75,16 @@
           "kv_connector": "OffloadingConnector",
           "kv_role": "kv_both",
           "kv_connector_extra_config": {
-            "spec_name": "TieringOffloadingSpec",
-            "cpu_bytes_to_use": 68719476736,
-            "eviction_policy": "arc",
+            "spec_name": "SharedStorageOffloadingSpec",
+            "spec_module_path": "py_kvcache.vllm",
+            "shared_storage_path": "/scratch-node/jkanichai-placeholder/py-kvcache-cache",
+            "sync_on_store": false,
+            "enable_preload": true,
+            "staging_mem": 256,
+            "preload_lookahead_requests": 16,
+            "preload_share_staging": true,
             "block_size": 256,
-            "secondary_tiers": [
-              {
-                "type": "fs_python",
-                "root_dir": "/scratch-node/jkanichai-placeholder/native-tier-disk"
-              }
-            ]
+            "staging_cache": "off"
           }
         }
       },

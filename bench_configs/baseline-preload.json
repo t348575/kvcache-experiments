@@ -5,7 +5,7 @@
   "vllm_port": 8000,
   "n_repetitions": 1,
   "server_startup_timeout": 600,
-  "output_prefix": "bench_llmd",
+  "output_prefix": "bench_baseline",
   "flush_mode": false,
   "flush": {
     "num_documents": 2,
@@ -21,8 +21,8 @@
       "40960",
       "81920"
     ],
-    "--output-len": ["1"],
-    "--prefix-reuse-pct": ["0.75"],
+    "--output-len": ["1", "1024"],
+    "--prefix-reuse-pct": ["0.5"],
     "--prefix-size": "1.0",
     "--max-concurrency": "8"
   },
@@ -36,28 +36,13 @@
   },
   "configs": [
     {
-      "name": "llmd",
-      "description": "SharedStorageOffloadingSpec via scratch-node path",
+      "name": "baseline",
+      "description": "No CPU offloading, no GPU prefix caching",
       "profile_json": "merge.json",
       "vllm_args": {
-        "--no-enable-prefix-caching": null,
-        "--kv-transfer-config": {
-          "kv_connector": "OffloadingConnector",
-          "kv_role": "kv_both",
-          "kv_connector_extra_config": {
-            "spec_name": "SharedStorageOffloadingSpec",
-            "spec_module_path": "llmd_fs_backend.spec",
-            "shared_storage_path": "/scratch-node/jkanichai-placeholder/llmd-cache",
-            "use_odirect": true,
-            "block_size": 256,
-            "max_staging_memory_gb": 64
-          }
-        },
-        "--distributed_executor_backend": "mp"
+        "--no-enable-prefix-caching": null
       },
-      "prefix_cache_args": {
-        "--max-concurrency": ["8", "50"]
-      }
+      "prefix_cache_args": {}
     }
   ]
 }

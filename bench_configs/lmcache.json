@@ -1,0 +1,118 @@
+{
+  "model": "meta-llama/Llama-3.2-3B-Instruct",
+  "max_model_len": 92000,
+  "gpu_mem_util": 0.9,
+  "vllm_port": 8000,
+  "n_repetitions": 1,
+  "server_startup_timeout": 600,
+  "output_prefix": "bench_lmcache",
+  "flush_mode": false,
+  "flush": {
+    "num_documents": 2,
+    "document_length": 90000,
+    "max_inflight_requests": 1
+  },
+  "prefix_cache_script": "prefix_cache_benchmark.py",
+  "prefix_cache_defaults": {
+    "--num-requests": "50",
+    "--doc-size": [
+      "1024",
+      "10240",
+      "40960",
+      "81920"
+    ],
+    "--output-len": ["1"],
+    "--prefix-reuse-pct": ["0.75"],
+    "--prefix-size": "1.0",
+    "--max-concurrency": "8"
+  },
+  "sharegpt_dataset_path": "dataset/ShareGPT_V3_unfiltered_cleaned_split.json",
+  "sharegpt_defaults": {
+    "--num-prompts": "100",
+    "--request-rate": "32",
+    "--percentile-metrics": "ttft,tpot,itl",
+    "--metric-percentiles": "95,99",
+    "--output-len": 1
+  },
+  "configs": [
+    {
+      "name": "lmcache_disk",
+      "description": "LMCache (LMCacheConnectorV1), local disk backend only (local_cpu=false)",
+      "profile_json": "merge.json",
+      "vllm_args": {
+        "--no-enable-prefix-caching": null,
+        "--kv-transfer-config": {
+          "kv_connector": "LMCacheConnectorV1",
+          "kv_role": "kv_both"
+        }
+      },
+      "env": {
+        "VLLM_RPC_BASE_PATH": "/tmp",
+        "LMCACHE_USE_EXPERIMENTAL": "True",
+        "LMCACHE_CHUNK_SIZE": "256",
+        "LMCACHE_LOCAL_CPU": "False",
+        "LMCACHE_MAX_LOCAL_CPU_SIZE": "64.0",
+        "LMCACHE_LOCAL_DISK": "file:///scratch-node/jkanichai-placeholder/lmcache-disk/",
+        "LMCACHE_MAX_LOCAL_DISK_SIZE": "512.0"
+      },
+      "prefix_cache_args": {
+        "--max-concurrency": [
+          "8",
+          "50"
+        ]
+      }
+    },
+    {
+      "name": "lmcache_cpu",
+      "description": "LMCache (LMCacheConnectorV1), CPU tier only (local_cpu=true, no disk)",
+      "profile_json": "merge.json",
+      "vllm_args": {
+        "--no-enable-prefix-caching": null,
+        "--kv-transfer-config": {
+          "kv_connector": "LMCacheConnectorV1",
+          "kv_role": "kv_both"
+        }
+      },
+      "env": {
+        "VLLM_RPC_BASE_PATH": "/tmp",
+        "LMCACHE_USE_EXPERIMENTAL": "True",
+        "LMCACHE_CHUNK_SIZE": "256",
+        "LMCACHE_LOCAL_CPU": "True",
+        "LMCACHE_MAX_LOCAL_CPU_SIZE": "64.0"
+      },
+      "prefix_cache_args": {
+        "--max-concurrency": [
+          "8",
+          "50"
+        ]
+      }
+    },
+        {
+      "name": "lmcache_cpu_disk",
+      "description": "LMCache (LMCacheConnectorV1), CPU and local disk backend",
+      "profile_json": "merge.json",
+      "vllm_args": {
+        "--no-enable-prefix-caching": null,
+        "--kv-transfer-config": {
+          "kv_connector": "LMCacheConnectorV1",
+          "kv_role": "kv_both"
+        }
+      },
+      "env": {
+        "VLLM_RPC_BASE_PATH": "/tmp",
+        "LMCACHE_USE_EXPERIMENTAL": "True",
+        "LMCACHE_CHUNK_SIZE": "256",
+        "LMCACHE_LOCAL_CPU": "True",
+        "LMCACHE_MAX_LOCAL_CPU_SIZE": "64.0",
+        "LMCACHE_LOCAL_DISK": "file:///scratch-node/jkanichai-placeholder/lmcache-disk/",
+        "LMCACHE_MAX_LOCAL_DISK_SIZE": "512.0"
+      },
+      "prefix_cache_args": {
+        "--max-concurrency": [
+          "8",
+          "50"
+        ]
+      }
+    }
+  ]
+}
