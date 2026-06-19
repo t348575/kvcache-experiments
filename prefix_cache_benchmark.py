@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
@@ -9,10 +8,11 @@ import random
 
 import pandas as pd
 from openai import AsyncOpenAI
-from prefix_cache_common import (
+from common.prefix_cache_common import (
     RequestResult,
     RequestSpec,
     generate_request_schedule,
+    get_base_url,
     parse_int_range,
     parse_pct_range,
     run_benchmark,
@@ -37,6 +37,12 @@ def print_summary(
     print(f"  Fresh (no reuse):      {len(fresh)}")
     print(f"  Prefix-reuse:          {len(reuse)}")
 
+    if not successful.empty:
+        print(f"\n{CSI}36mAll requests:{RESET}")
+        print(f"  Mean TTFT:   {successful['ttft'].mean():.3f}s")
+        print(f"  Median TTFT: {successful['ttft'].median():.3f}s")
+        print(f"  P99 TTFT:    {successful['ttft'].quantile(0.99):.3f}s")
+
     if not fresh.empty:
         print(f"\n{CSI}33mFresh requests:{RESET}")
         print(f"  Mean TTFT:   {fresh['ttft'].mean():.3f}s")
@@ -59,7 +65,6 @@ def print_summary(
     total_time = df["request_end"].max() - df["request_start"].min()
     print(f"\n  Wall-clock time: {total_time:.3f}s")
 
-    # Latency (end-to-end per request)
     df["latency"] = df["request_end"] - df["request_start"]
 
     if csv_output:
@@ -70,6 +75,15 @@ def print_summary(
         summary = {
             "total_requests": len(df),
             "successful": int(len(successful)),
+            "all_mean_ttft": float(successful["ttft"].mean())
+            if not successful.empty
+            else None,
+            "all_median_ttft": float(successful["ttft"].median())
+            if not successful.empty
+            else None,
+            "all_p99_ttft": float(successful["ttft"].quantile(0.99))
+            if not successful.empty
+            else None,
             "fresh_mean_ttft": float(fresh["ttft"].mean()) if not fresh.empty else None,
             "reuse_mean_ttft": float(reuse["ttft"].mean()) if not reuse.empty else None,
             "ttft_speedup": float(fresh["ttft"].mean() / reuse["ttft"].mean())
@@ -78,6 +92,44 @@ def print_summary(
             "wall_clock_s": float(total_time),
         }
         print(json.dumps(summary))
+
+
+def print_schedule(specs) -> None:
+    CSI = "\x1b["
+    RESET = CSI + "0m"
+    YELLOW = CSI + "33m"
+    GREEN = CSI + "32m"
+
+    children: dict[int, list[int]] = {}
+    for s in specs:
+        if s.reuse_source_id is not None:
+            children.setdefault(s.reuse_source_id, []).append(s.request_id)
+
+    print(f"\n{CSI}36;1m=== REQUEST SCHEDULE ==={RESET}")
+    print(
+        "  trace req_id contains the 'vllm_id' token below "
+        "(full id is chatcmpl-<vllm_id> or cmpl-<vllm_id>)."
+    )
+    print(
+        f"  {'req_id':>7}  {'vllm_id':<12}  {'kind':<5}  "
+        f"{'parent':>7}  {'prefix_len':>10}  reused_by"
+    )
+    for s in specs:
+        if s.reuse_source_id is not None:
+            color, label = GREEN, "REUSE"
+            parent = str(s.reuse_source_id)
+            prefix = str(s.reuse_prefix_len or 0)
+        else:
+            color, label = YELLOW, "FRESH"
+            parent = "-"
+            prefix = "-"
+        reused_by = ",".join(str(c) for c in children.get(s.request_id, [])) or "-"
+        kind = f"{color}{label:<5}{RESET}"
+        vllm_id = f"bench-{s.request_id}"
+        print(
+            f"  {s.request_id:>7}  {vllm_id:<12}  {kind}  "
+            f"{parent:>7}  {prefix:>10}  {reused_by}"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -168,18 +220,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--json-output", action="store_true", help="Print JSON summary line to stdout."
     )
     p.add_argument(
+        "--print-schedule",
+        action="store_true",
+        help="Print each request id, whether it is fresh or a prefix-reuse, "
+        "its parent (reuse source) id, and the reused prefix length.",
+    )
+    p.add_argument(
         "--seed", type=int, default=42, help="Random seed for reproducibility."
     )
 
     return p
-
-
-def get_base_url(args) -> str:
-    if args.base_url is not None:
-        return args.base_url
-    host = args.host or "localhost"
-    port = args.port or 8000
-    return f"http://{host}:{port}/v1"
 
 
 async def run_pre_warmup_requests(
@@ -253,7 +303,6 @@ async def main():
             eos_token_id=args.eos_token_id,
         )
 
-    # Build schedule
     specs = generate_request_schedule(
         num_requests=args.num_requests,
         doc_size_lo=doc_lo,
@@ -276,6 +325,9 @@ async def main():
             f"Poisson arrival rate: {args.arrival_rate} req/s  "
             f"(schedule spans {total_span:.1f}s)"
         )
+
+    if args.print_schedule:
+        print_schedule(specs)
 
     results = await run_benchmark(
         client=client,

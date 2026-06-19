@@ -47,7 +47,7 @@
           "kv_connector_extra_config": {
             "spec_name": "SharedStorageOffloadingSpec",
             "spec_module_path": "llmd_fs_backend.spec",
-            "shared_storage_path": "/scratch-node/jkanichai-placeholder/llmd-cache",
+            "shared_storage_path": "{data_dir}/llmd-cache",
             "use_odirect": true,
             "block_size": 256,
             "max_staging_memory_gb": 64

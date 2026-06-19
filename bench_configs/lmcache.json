@@ -52,7 +52,7 @@
         "LMCACHE_CHUNK_SIZE": "256",
         "LMCACHE_LOCAL_CPU": "False",
         "LMCACHE_MAX_LOCAL_CPU_SIZE": "64.0",
-        "LMCACHE_LOCAL_DISK": "file:///scratch-node/jkanichai-placeholder/lmcache-disk/",
+        "LMCACHE_LOCAL_DISK": "file://{data_dir}/lmcache-disk/",
         "LMCACHE_MAX_LOCAL_DISK_SIZE": "512.0"
       },
       "prefix_cache_args": {
@@ -104,7 +104,7 @@
         "LMCACHE_CHUNK_SIZE": "256",
         "LMCACHE_LOCAL_CPU": "True",
         "LMCACHE_MAX_LOCAL_CPU_SIZE": "64.0",
-        "LMCACHE_LOCAL_DISK": "file:///scratch-node/jkanichai-placeholder/lmcache-disk/",
+        "LMCACHE_LOCAL_DISK": "file://{data_dir}/lmcache-disk/",
         "LMCACHE_MAX_LOCAL_DISK_SIZE": "512.0"
       },
       "prefix_cache_args": {

@@ -69,7 +69,7 @@
             "secondary_tiers": [
               {
                 "type": "fs_python",
-                "root_dir": "/scratch-node/jkanichai-placeholder/native-tier-disk"
+                "root_dir": "{data_dir}/native-tier-disk"
               }
             ]
           }

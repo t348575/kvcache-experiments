@@ -55,7 +55,7 @@
           "kv_connector_extra_config": {
             "spec_name": "SharedStorageOffloadingSpec",
             "spec_module_path": "py_kvcache.vllm",
-            "shared_storage_path": "/scratch-node/jkanichai-placeholder/py-kvcache-cache",
+            "shared_storage_path": "{data_dir}/py-kvcache-cache",
             "sync_on_store": false,
             "enable_preload": false
           }
@@ -83,7 +83,7 @@
           "kv_connector_extra_config": {
             "spec_name": "SharedStorageOffloadingSpec",
             "spec_module_path": "py_kvcache.vllm",
-            "shared_storage_path": "/scratch-node/jkanichai-placeholder/py-kvcache-cache",
+            "shared_storage_path": "{data_dir}/py-kvcache-cache",
             "sync_on_store": false,
             "enable_preload": true,
             "preload_lookahead_requests": 16,
@@ -112,7 +112,7 @@
           "kv_connector_extra_config": {
             "spec_name": "SharedStorageOffloadingSpec",
             "spec_module_path": "py_kvcache.vllm",
-            "shared_storage_path": "/scratch-node/jkanichai-placeholder/py-kvcache-cache",
+            "shared_storage_path": "{data_dir}/py-kvcache-cache",
             "sync_on_store": false,
             "enable_preload": false
           }
@@ -139,7 +139,7 @@
           "kv_connector_extra_config": {
             "spec_name": "SharedStorageOffloadingSpec",
             "spec_module_path": "py_kvcache.vllm",
-            "shared_storage_path": "/scratch-node/jkanichai-placeholder/py-kvcache-cache",
+            "shared_storage_path": "{data_dir}/py-kvcache-cache",
             "sync_on_store": false,
             "enable_preload": true,
             "preload_lookahead_requests": 16,
