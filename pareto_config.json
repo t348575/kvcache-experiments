@@ -1,0 +1,73 @@
+{
+  "max_model_len": 92000,
+  "gpu_mem_util": 0.9,
+  "vllm_port": 8000,
+  "output_tokens": 1,
+  "server_startup_timeout": 200,
+  "kv_buffer": 0.25,
+  "cold_only": false,
+  "benchmark_script": "prefix_cache_benchmark.py",
+  "output_prefix": "pareto_measure",
+  "doc_sizes": [1024, 2048, 4096, 8192, 16384, 32768, 49152, 65536, 81920],
+  "n_repeats_serial": 3,
+  "n_repeats_concurrency": 3,
+  "concurrency_doc_sizes": [],
+  "concurrency_levels": [],
+  "models": {
+    "llama-3.2-3b": "meta-llama/Llama-3.2-3B-Instruct",
+    "llama-3.1-8b": "meta-llama/Llama-3.1-8B-Instruct",
+    "Mistral-Small-3.1-24B": "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
+    "qwen3-4b": "Qwen/Qwen3-4B-Instruct-2507",
+    "qwen2.5-32b-fp16": "Qwen/Qwen2.5-32B-Instruct",
+    "llama-3.1-70b-fp8": "nvidia/Llama-3.1-70B-Instruct-FP8",
+    "gemma-3-27b-fp8": "google/gemma-3-27b-it",
+    "qwen3-32b-fp8": "Qwen/Qwen3-32B"
+  },
+  "configs": {
+    "baseline": {
+      "--no-enable-prefix-caching": null
+    },
+    "gpu_caching": {},
+    "native_offload": {
+      "--no-enable-prefix-caching": null,
+      "--kv-offloading-backend": "native",
+      "--kv-offloading-size": "128",
+      "--disable-hybrid-kv-cache-manager": null
+    },
+    "llmd_offload": {
+      "--no-enable-prefix-caching": null,
+      "--kv-transfer-config": {
+        "kv_connector": "OffloadingConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {
+          "spec_name": "SharedStorageOffloadingSpec",
+          "spec_module_path": "llmd_fs_backend.spec",
+          "shared_storage_path": "{data_dir}/llm-d-fs",
+          "use_odirect": true
+        }
+      },
+      "--distributed_executor_backend": "mp",
+      "is_storage": true
+    },
+    "py_offload": {
+      "--no-enable-prefix-caching": null,
+      "--kv-transfer-config": {
+        "kv_connector": "OffloadingConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {
+          "spec_name": "SharedStorageOffloadingSpec",
+          "spec_module_path": "py_kvcache.vllm",
+          "shared_storage_path": "{data_dir}/py-kvcache",
+          "sync_on_store": false,
+          "enable_preload": true,
+          "staging_mem": 256,
+          "preload_lookahead_requests": 16,
+          "preload_share_staging": true,
+          "block_size": 256,
+          "staging_cache": "off"
+        }
+      },
+      "is_storage": true
+    }
+  }
+}
