@@ -1,0 +1,7 @@
+{
+  "model_name": "Qwen/Qwen3-4B-Instruct-2507",
+  "kv_dtype": "fp16",
+  "break_even_ssd_tokens": 559,
+  "break_even_mem_tokens": 481,
+  "safety_margin_tokens": 0
+}

@@ -1,0 +1,7 @@
+{
+  "model_name": "meta-llama/Llama-3.2-3B-Instruct",
+  "kv_dtype": "auto",
+  "break_even_ssd_tokens": 6057,
+  "break_even_mem_tokens": 736,
+  "safety_margin_tokens": 0
+}
