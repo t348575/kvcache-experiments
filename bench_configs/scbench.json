@@ -7,16 +7,15 @@
   "server_startup_timeout": 600,
   "output_prefix": "scbench_bench",
   "prefix_cache_script": "prefix_cache_benchmark.py",
-  "sharegpt_dataset_path": "dataset/ShareGPT_V3_unfiltered_cleaned_split.json",
   "scbench_script": "scripts/scbench_replay.py",
   "scbench_defaults": {
     "--parquet-dir": "dataset/scbench",
-    "--max-sessions": "10",
-    "--max-turns": "5",
+    "--max-sessions": "20",
     "--max-context-tokens": "250000",
-    "--max-concurrency": "16",
+    "--max-concurrency": "50",
     "--output-len": "1",
-    "--closed-loop": null
+    "--closed-loop": null,
+    "--round-robin": null
   },
   "configs": [
     {
@@ -26,10 +25,7 @@
       },
       "scbench_args": {
         "--config": [
-          "scbench_kv",
-          "scbench_qa_eng",
-          "scbench_summary",
-          "scbench_many_shot"
+          "scbench_kv"
         ]
       }
     },
@@ -56,10 +52,7 @@
       },
       "scbench_args": {
         "--config": [
-          "scbench_kv",
-          "scbench_qa_eng",
-          "scbench_summary",
-          "scbench_many_shot"
+          "scbench_kv"
         ]
       }
     },
@@ -87,10 +80,7 @@
       },
       "scbench_args": {
         "--config": [
-          "scbench_kv",
-          "scbench_qa_eng",
-          "scbench_summary",
-          "scbench_many_shot"
+          "scbench_kv"
         ]
       }
     },
@@ -114,10 +104,7 @@
       },
       "scbench_args": {
         "--config": [
-          "scbench_kv",
-          "scbench_qa_eng",
-          "scbench_summary",
-          "scbench_many_shot"
+          "scbench_kv"
         ]
       }
     }
