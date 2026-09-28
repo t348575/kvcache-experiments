@@ -7,10 +7,9 @@
   "server_startup_timeout": 600,
   "output_prefix": "longbench_bench",
   "prefix_cache_script": "prefix_cache_benchmark.py",
-  "sharegpt_dataset_path": "dataset/ShareGPT_V3_unfiltered_cleaned_split.json",
   "longbench_script": "scripts/longbench_v2_replay.py",
   "longbench_defaults": {
-    "--domain": "Multi-Document QA",
+    "--domain": "Code Repository Understanding",
     "--max-base-docs": "10",
     "--chain-followups": "2-8",
     "--chain-append-tokens": "128-10000",
@@ -28,7 +27,8 @@
       },
       "longbench_args": {
         "--domain": [
-          "Multi-Document QA"
+          "Multi-Document QA",
+          "Code Repository Understanding"
         ]
       }
     },
@@ -55,7 +55,8 @@
       },
       "longbench_args": {
         "--domain": [
-          "Multi-Document QA"
+          "Multi-Document QA",
+          "Code Repository Understanding"
         ]
       }
     },
@@ -83,7 +84,8 @@
       },
       "longbench_args": {
         "--domain": [
-          "Multi-Document QA"
+          "Multi-Document QA",
+          "Code Repository Understanding"
         ]
       }
     },
@@ -107,7 +109,8 @@
       },
       "longbench_args": {
         "--domain": [
-          "Multi-Document QA"
+          "Multi-Document QA",
+          "Code Repository Understanding"
         ]
       }
     }

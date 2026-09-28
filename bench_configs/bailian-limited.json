@@ -8,7 +8,6 @@
   "output_prefix": "bailian_bench",
 
   "prefix_cache_script": "prefix_cache_benchmark.py",
-  "sharegpt_dataset_path": "dataset/ShareGPT_V3_unfiltered_cleaned_split.json",
 
   "bailian_script": "scripts/bailian_replay.py",
   "bailian_trace_path": "dataset/bailian",

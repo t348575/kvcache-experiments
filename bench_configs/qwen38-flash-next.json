@@ -1,0 +1,35 @@
+{
+  "max_model_len": 262144,
+  "gpu_mem_util": 0.8,
+  "vllm_port": 8000,
+  "output_tokens": 1,
+  "server_startup_timeout": 1800,
+  "kv_buffer": 0.25,
+  "cold_only": false,
+  "benchmark_script": "prefix_cache_benchmark.py",
+  "output_prefix": "pareto_qwen",
+  "doc_sizes": [1024, 4096, 16384, 32768, 65536, 98304, 131072, 196608, 262000],
+  "n_repeats_serial": 3,
+  "n_repeats_concurrency": 3,
+  "concurrency_doc_sizes": [],
+  "concurrency_levels": [],
+  "models": {
+    "qwen3.8-flash-next-nvfp4": "nvidia/Qwen3.8-Flash-Next-NVFP4"
+  },
+  "vllm_defaults": {
+    "--tensor-parallel-size": "2"
+  },
+  "configs": {
+    "baseline": {
+      "--no-enable-prefix-caching": null
+    },
+    "gpu_caching": {
+      "--mamba-cache-mode": "align"
+    },
+    "native_offload": {
+      "--no-enable-prefix-caching": null,
+      "--kv-offloading-backend": "native",
+      "--kv-offloading-size": "64"
+    }
+  }
+}

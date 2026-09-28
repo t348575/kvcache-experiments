@@ -56,8 +56,9 @@ python -m scripts.pareto_measure --config pareto_config.json
 | --- | --- |
 | `--config` | Path to the pareto JSON config (default `pareto_config.json`). |
 | `--server-configs` | Subset of server configs to run (default: all in the config). |
-| `--wipe-shared-storage` | After each storage job, `rm -rf` its `shared_storage_path`. |
 | `--data-dir` | Base directory substituted for the `{data_dir}` token in storage paths (required). |
+
+After every storage job, the script automatically wipes its `shared_storage_path`.
 
 #### Break even json file
 

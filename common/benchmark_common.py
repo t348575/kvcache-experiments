@@ -30,6 +30,7 @@ def parse_profile_json(json_path: str) -> list[dict]:
         if not isinstance(event, dict):
             continue
         name = event.get("name", "")
+        args = event.get("args") or {}
         if name.startswith("cuda_transfer("):
             inner = name.split("(", 1)[1].rstrip(")")
             direction = "to_gpu" if "cpu_to_gpu" in inner else "from_gpu"
@@ -37,13 +38,21 @@ def parse_profile_json(json_path: str) -> list[dict]:
             direction = "to_gpu"
         elif name == "VLLMPagedMemGPUConnectorV2.from_gpu.kernel":
             direction = "from_gpu"
+        elif name.startswith("fs_offload_transfer("):
+            fs_direction = args.get("direction", "")
+            if fs_direction.endswith("->GPU"):
+                direction = "to_gpu"
+            elif fs_direction.startswith("GPU->"):
+                direction = "from_gpu"
+            else:
+                continue
         else:
             continue
         transfers.append({
             "direction": direction,
             "ts_us": event.get("ts", ""),
             "dur_us": event.get("dur", ""),
-            "num_bytes": (event.get("args") or {}).get("num_bytes", ""),
+            "num_bytes": args.get("num_bytes", args.get("size_bytes", "")),
         })
     return transfers
 

@@ -1,7 +1,8 @@
 """Fetch model KV-cache geometry from a Hugging Face config.json.
 
 Mapping to config.json fields:
-  num_layers   -> num_hidden_layers
+  num_layers   -> num_hidden_layers, minus linear-attention/mamba layers
+                  listed in layer_types (hybrid models keep no per-token KV there)
   num_kv_heads -> num_key_value_heads  (falls back to num_attention_heads, i.e. MHA)
   head_dim     -> explicit head_dim if present, else hidden_size // num_attention_heads
 
@@ -33,6 +34,9 @@ def fetch_model_geometry(model_id: str) -> tuple[int, int, int]:
         cfg = _text_config(json.load(f))
 
     num_layers = int(cfg["num_hidden_layers"])
+    layer_types = cfg.get("layer_types")
+    if layer_types:
+        num_layers = sum(t not in ("linear_attention", "mamba") for t in layer_types)
     num_attention_heads = int(cfg["num_attention_heads"])
     num_kv_heads = int(cfg.get("num_key_value_heads", num_attention_heads))
     head_dim = int(cfg.get("head_dim") or cfg["hidden_size"] // num_attention_heads)

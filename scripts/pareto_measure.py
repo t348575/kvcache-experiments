@@ -103,7 +103,8 @@ def apply_loaded_config(config: dict) -> None:
     CONCURRENCY_DOC_SIZES  = list(config.get("concurrency_doc_sizes", []))
     CONCURRENCY_LEVELS     = list(config.get("concurrency_levels", []))
     MODELS                 = dict(config["models"])
-    SERVER_CONFIGS         = dict(config["configs"])
+    SERVER_CONFIGS         = {name: {**config.get("vllm_defaults", {}), **cfg}
+                              for name, cfg in config["configs"].items()}
 
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_prefix = str(config.get("output_prefix", "pareto_measure"))
@@ -367,6 +368,14 @@ def save_profile(job_idx: int) -> Optional[str]:
         return None
 
 
+def cleanup_profile_registry() -> None:
+    """Delete stale profiler registry state before the next job."""
+    registry = f"{PROFILE_JSON}.registry"
+    if os.path.exists(registry):
+        os.remove(registry)
+        print(f"  Deleted profile registry: {registry}")
+
+
 def write_csv(results: list[Result], path: str) -> None:
     write_dataclass_csv(results, path)
     print(f"  💾  Results → {path}  ({len(results)} rows)")
@@ -407,11 +416,6 @@ def parse_args():
         "--config",
         default=DEFAULT_CONFIG_PATH,
         help=f"Path to pareto JSON config (default: {DEFAULT_CONFIG_PATH})",
-    )
-    parser.add_argument(
-        "--wipe-shared-storage",
-        action="store_true",
-        help="After each storage job, rm -rf the shared_storage_path",
     )
     parser.add_argument(
         "--server-configs",
@@ -462,7 +466,6 @@ def main():
     jobs = build_job_plan(server_configs)
 
     print(f"\n  Server configs : {', '.join(server_configs)}")
-    print(f"  Wipe storage   : {'yes' if args.wipe_shared_storage else 'no'}")
 
     cold_s  = [j for j in jobs if j.curve == "cold_prefill" and j.concurrency == 1]
     hit_s   = [j for j in jobs if j.curve == "cache_hit"    and j.concurrency == 1]
@@ -541,16 +544,12 @@ def main():
         finally:
             if server_proc:
                 stop_server(server_proc)
-            if args.wipe_shared_storage and is_storage_config(job.server_config):
-                wipe_shared_storage(job.server_config)
 
+        # simple-profiler writes PROFILE_JSON only after vLLM exits.
+        result.gpu_transfer_csv = save_profile(job_idx)
+        cleanup_profile_registry()
         if is_storage_config(job.server_config):
-            print(f"  ⏳ Sleeping 5s before next storage job…")
-            time.sleep(5)
-
-        # simple-profiler writes PROFILE_JSON only after vLLM exits, so copy it now.
-        if result and not result.error:
-            result.gpu_transfer_csv = save_profile(job_idx)
+            wipe_shared_storage(job.server_config)
 
         all_results.append(result)
 
@@ -566,6 +565,10 @@ def main():
 
         # Write after every job so partial results survive crashes.
         write_csv(all_results, OUTPUT_CSV)
+
+        if job_idx < len(jobs):
+            print("  ⏳ Sleeping 5s before next job…")
+            time.sleep(5)
 
     write_csv(all_results, OUTPUT_CSV)
 

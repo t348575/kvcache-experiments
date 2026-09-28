@@ -18,8 +18,8 @@ def thousands_formatter(x, _: object) -> str:
     return f"{x:,.0f}"
 
 
-def save_figure(path: str, dpi: int = 300) -> None:
-    plt.tight_layout()
+def save_figure(path: str, dpi: int = 300, pad: float = 1.08) -> None:
+    plt.tight_layout(pad=pad)
     plt.savefig(path, dpi=dpi, bbox_inches="tight")
     plt.close()
 

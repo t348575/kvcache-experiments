@@ -13,6 +13,7 @@ import csv
 import itertools
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -111,6 +112,12 @@ def parse_args() -> argparse.Namespace:
         help="Path to a prior results CSV; skip (config_name, repetition) pairs "
              "that completed without error and only run the missing ones",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the vLLM server and benchmark commands for every run "
+             "(copy-paste friendly) without starting any process",
+    )
     return parser.parse_args()
 
 
@@ -167,7 +174,7 @@ def apply_loaded_config(config: dict[str, Any]) -> None:
 
     PREFIX_CACHE_SCRIPT = _require_config_key(config, "prefix_cache_script")
     PREFIX_CACHE_DEFAULTS = dict(config.get("prefix_cache_defaults", {}))
-    SHAREGPT_DATASET_PATH = _require_config_key(config, "sharegpt_dataset_path")
+    SHAREGPT_DATASET_PATH = config.get("sharegpt_dataset_path")
     SHAREGPT_DEFAULTS = dict(config.get("sharegpt_defaults", {}))
     BAILIAN_TRACE_PATH = config.get("bailian_trace_path")
     BAILIAN_SCRIPT = config.get("bailian_script", "scripts/bailian_replay.py")
@@ -412,6 +419,8 @@ def build_prefix_cache_command(pc_args: dict, port: Optional[int] = None) -> lis
 
 
 def build_sharegpt_command(sharegpt_args: dict, result_json_path: str, port: Optional[int] = None) -> list[str]:
+    if not SHAREGPT_DATASET_PATH:
+        raise ValueError("Config uses a sharegpt benchmark but 'sharegpt_dataset_path' is not set")
     p = port if port is not None else VLLM_PORT
     cmd = [
         "vllm", "bench", "serve",
@@ -788,6 +797,42 @@ def _print_final_summary(all_results: list[BenchmarkResult]) -> None:
             )
 
 
+def format_command(cmd: list[str], env: Optional[dict] = None) -> str:
+    parts = [f"{k}={shlex.quote(str(v))}" for k, v in (env or {}).items()]
+    parts.extend(shlex.quote(str(c)) for c in cmd)
+    return " ".join(parts)
+
+
+def dry_run_print(config: dict, run_num: int, port: int) -> None:
+    print(f"\n{'─'*70}")
+    print(f"# {config['name']}  (run {run_num})")
+    print(f"{'─'*70}")
+    print("# vLLM server:")
+    print(format_command(build_vllm_command(config["vllm_args"], port=port), config.get("env")))
+
+    benchmark = config.get("benchmark", "prefix_cache")
+    if benchmark == "sharegpt":
+        result_json = os.path.join(OUTPUT_DIR, f"run_{run_num:03d}_sharegpt.json")
+        bench_cmd = build_sharegpt_command(config["sharegpt_args"], result_json, port=port)
+    elif benchmark == "bailian":
+        csv_path = os.path.join(OUTPUT_DIR, f"run_{run_num:03d}.csv")
+        bench_cmd = build_bailian_command(config["bailian_args"], csv_path, port=port)
+    elif benchmark == "longbench":
+        csv_path = os.path.join(OUTPUT_DIR, f"run_{run_num:03d}.csv")
+        bench_cmd = build_longbench_command(config["longbench_args"], csv_path, port=port)
+    elif benchmark == "scbench":
+        csv_path = os.path.join(OUTPUT_DIR, f"run_{run_num:03d}.csv")
+        bench_cmd = build_scbench_command(config["scbench_args"], csv_path, port=port)
+    else:
+        csv_path = os.path.join(OUTPUT_DIR, f"run_{run_num:03d}.csv")
+        bench_cmd = build_prefix_cache_command(config["prefix_cache_args"], port=port) + [
+            "--csv-output", csv_path, "--json-output",
+        ]
+
+    print(f"# {benchmark} benchmark:")
+    print(format_command(bench_cmd))
+
+
 def main():
     args = parse_args()
     loaded_config = load_config(args.config)
@@ -825,6 +870,12 @@ def main():
 
     if total_runs == 0:
         print("  Nothing to run — all configs already completed in the resume CSV.")
+        return
+
+    if args.dry_run:
+        print("\n  Dry run — printing commands only, nothing will execute.")
+        for run_num, (config, _rep) in enumerate(experiments, 1):
+            dry_run_print(config, run_num, VLLM_PORT)
         return
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
